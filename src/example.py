@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Grid-Based Pre-placement Tool with Blockage Support
 使用網格結構和 A* 演算法的預放置工具
@@ -45,7 +46,7 @@ class Rectangle:
             int(np.ceil(self.urx / grid_size)),
             int(np.ceil(self.ury / grid_size))
         )
-    
+
     def center(self) -> Point:
         """返回矩形中心點"""
         return Point((self.llx + self.urx) / 2, (self.lly + self.ury) / 2)
@@ -69,16 +70,16 @@ class Constraint:
     """放置約束"""
     type: str  # 'close_to_target', 'pipe'
     elements: List[str] = field(default_factory=list) # 受影響的元件列表
-    
+
     # close_to_target 相關
     target_type: Optional[str] = None # 'cell', 'coords', 'pin'
     target_name: Optional[str] = None # 目標名稱 (cell)
     target_coords: Optional[Point] = None # 目標座標 (coords)
-    
+
     # pipe 相關
     start: Optional[str] = None   # pipe 起點元件
     end: Optional[str] = None     # pipe 終點元件
-    
+
     element_type: str = 'single'  # 'single', 'instancesgroup'
     area: float = 20.0            # 僅用於 instancesgroup
 
@@ -244,6 +245,7 @@ class GridBasedPlacer:
                     constraint.type = 'close_to_target'
                 elif 'pipe' in line: # 新的約束類型名稱
                     constraint.type = 'pipe'
+                    constraint.element_type = 'single'  # pipe 類型固定為 single
 
                 i += 1
                 while i < len(lines):
@@ -275,7 +277,7 @@ class GridBasedPlacer:
                             constraint.area = float(line.split(':')[1].strip())
                         elif line.startswith('Element:'):
                             constraint.elements = line.split(':')[1].strip().split()
-                    
+
                     # pipe 相關解析
                     elif constraint.type == 'pipe':
                         if line.startswith('Start:'):
@@ -285,9 +287,10 @@ class GridBasedPlacer:
                         elif line.startswith('Stage'): # Stage1, Stage2, ...
                             elements = line.split(':')[1].strip().split()
                             constraint.elements.extend(elements) # 累積所有 Stage 的元件
+                        # 跳過 Element Type 和 Area 行，因為 pipe 類型固定為 single
 
                     i += 1
-                
+
                 if constraint.elements: # 只有當有元件時才加入約束列表
                     self.constraints.append(constraint)
 
@@ -310,7 +313,7 @@ class GridBasedPlacer:
             for x in range(self.grid_width):
                 px = (x + 0.5) * self.grid_size
                 py = (y + 0.5) * self.grid_size
-                
+
                 if not self.core_area.contains_point(Point(px, py)):
                     self.grid_map[y, x] = self.GRID_BLOCKED
 
@@ -352,7 +355,7 @@ class GridBasedPlacer:
         # 調整目標網格到有效範圍內
         target_grid_x = max(0, min(target_grid_x, self.grid_width - 1))
         target_grid_y = max(0, min(target_grid_y, self.grid_height - 1))
-            
+
         # 如果目標點本身可用
         if self.grid_map[target_grid_y, target_grid_x] == self.GRID_FREE:
             return (target_grid_x, target_grid_y)
@@ -376,7 +379,7 @@ class GridBasedPlacer:
                 nx, ny = x + dx, y + dy
                 if (0 <= nx < self.grid_width and 0 <= ny < self.grid_height and (nx, ny) not in visited):
                     queue.append((nx, ny))
-        
+
         return None # 找不到可用網格
 
     def a_star_path(self, start: Tuple[int, int],
@@ -392,8 +395,8 @@ class GridBasedPlacer:
         open_set = []
         heapq.heappush(open_set, (0 + heuristic(start, end), 0, start, [start]))
 
-        g_scores = {start: 0} 
-        visited_nodes = set() 
+        g_scores = {start: 0}
+        visited_nodes = set()
 
         while open_set:
             f_score, g_score, current, path = heapq.heappop(open_set)
@@ -415,15 +418,15 @@ class GridBasedPlacer:
                     0 <= ny < self.grid_height and
                     self.grid_map[ny, nx] == self.GRID_FREE and # 只能走 GRID_FREE
                     neighbor not in visited_nodes):
-                    
-                    tentative_g_score = g_score + 1 
+
+                    tentative_g_score = g_score + 1
 
                     if neighbor not in g_scores or tentative_g_score < g_scores[neighbor]:
                         g_scores[neighbor] = tentative_g_score
                         h_score = heuristic(neighbor, end)
                         f_score = tentative_g_score + h_score
                         heapq.heappush(open_set, (f_score, tentative_g_score, neighbor, path + [neighbor]))
-        
+
         return None # 找不到路徑
 
     def get_target_point_for_constraint(self, constraint: Constraint) -> Optional[Point]:
@@ -447,12 +450,12 @@ class GridBasedPlacer:
         side_grids_min = int(np.ceil(np.sqrt(grids_needed)))
 
         target_grid_x, target_grid_y = near_point.to_grid(self.grid_size)
-        
+
         best_region_rect = None
         min_dist_sq = float('inf')
 
         # 限制搜尋範圍，避免無限擴展
-        search_limit = max(self.grid_width, self.grid_height) // 2 
+        search_limit = max(self.grid_width, self.grid_height) // 2
 
         # 從目標點開始，螺旋向外搜尋
         for radius in range(search_limit + 1):
@@ -496,12 +499,12 @@ class GridBasedPlacer:
                                 break
                         if not is_free:
                             break
-                    
+
                     if is_free:
                         # 計算此區域中心到 near_point 的距離
                         region_center_x = (ll_grid_x + current_side_grids / 2.0) * self.grid_size
                         region_center_y = (ll_grid_y + current_side_grids / 2.0) * self.grid_size
-                        
+
                         dist_sq = (region_center_x - near_point.x)**2 + \
                                   (region_center_y - near_point.y)**2
 
@@ -530,12 +533,12 @@ class GridBasedPlacer:
             # 所以這裡需要重新計算 urx_grid, ury_grid
             urx_grid = int(np.ceil(best_region_rect.urx / self.grid_size))
             ury_grid = int(np.ceil(best_region_rect.ury / self.grid_size))
-            
+
             for y_grid in range(lly_grid, ury_grid):
                 for x_grid in range(llx_grid, urx_grid):
                     if 0 <= x_grid < self.grid_width and 0 <= y_grid < self.grid_height:
                         self.grid_map[y_grid, x_grid] = self.GRID_RESERVED
-        
+
         return best_region_rect
 
 
@@ -549,15 +552,15 @@ class GridBasedPlacer:
 
         for idx, constraint in enumerate(self.constraints):
             print(f"處理約束 C{idx}: Type={constraint.type}, Elements={constraint.elements}")
-            # 更新當前約束的文字標籤
+            # 更新當前約束的文字標籤 - 放在上方中央避免遮擋
             if self.current_constraint_text:
                 self.current_constraint_text.remove()
             self.current_constraint_text = self.ax_placement.text(
-                0.01, 0.99, f"Processing C{idx}: {constraint.type}",
-                transform=self.ax_placement.transAxes, va='top', ha='left',
-                fontsize=12, color='red', bbox=dict(facecolor='white', alpha=0.8, edgecolor='none', boxstyle='round,pad=0.2')
+                0.5, 0.98, f"Processing C{idx}: {constraint.type}",
+                transform=self.ax_placement.transAxes, va='top', ha='center',
+                fontsize=12, color='red', bbox=dict(facecolor='yellow', alpha=0.9, edgecolor='red', boxstyle='round,pad=0.3')
             )
-            
+
             try:
                 if constraint.type == 'close_to_target':
                     target_point = self.get_target_point_for_constraint(constraint)
@@ -590,11 +593,11 @@ class GridBasedPlacer:
                             )
                     else: # single instance
                         position_grid = self.find_nearest_free_grid(target_point)
-                        
+
                         if position_grid:
                             # 將找到的網格標記為 BLOCKED，避免其他單一實例重複佔用
                             self.grid_map[position_grid[1], position_grid[0]] = self.GRID_BLOCKED
-                            
+
                             position = Point(
                                 (position_grid[0] + 0.5) * self.grid_size,
                                 (position_grid[1] + 0.5) * self.grid_size
@@ -667,7 +670,7 @@ class GridBasedPlacer:
                                 self.core_area.ury - self.grid_size
                             )
                         print(f"警告: Constraint C{idx}: End element '{constraint.end}' not found or placed, using a point near ({end_pos.x:.2f}, {end_pos.y:.2f}).")
-                    
+
                     constraint.vis_start_point = start_pos
                     constraint.vis_end_point = end_pos
 
@@ -694,12 +697,12 @@ class GridBasedPlacer:
                         positions = []
                         # 確保至少有 num_elements + 1 個間隔，讓元件可以分散
                         # 如果路徑太短，讓每個元件盡可能分散
-                        path_step = max(1, len(path) // (num_elements + 1)) 
+                        path_step = max(1, len(path) // (num_elements + 1))
 
                         for i in range(num_elements):
                             idx_on_path = min((i + 1) * path_step, len(path) - 1)
                             grid_point = path[idx_on_path]
-                            
+
                             # 將路徑上的網格點標記為 BLOCKED
                             if self.grid_map[grid_point[1], grid_point[0]] == self.GRID_FREE:
                                 self.grid_map[grid_point[1], grid_point[0]] = self.GRID_BLOCKED
@@ -722,7 +725,7 @@ class GridBasedPlacer:
 
             except Exception as e:
                 self.failed_constraints.append(f"Constraint C{idx} processing error for {constraint.elements}: {str(e)}")
-            
+
             # 每處理一個約束就更新視覺化
             self._update_placement_visualization(idx)
             time.sleep(debug_plot_interval) # 暫停一段時間以便觀察
@@ -754,7 +757,7 @@ class GridBasedPlacer:
                     # 將實例加入群組 (確保這些實例在 Innovus 中是存在的)
                     instances = " ".join(data['instances'])
                     f.write(f"addInstToInstGroup {name} {{ {instances} }}\n\n")
-            
+
             # 再處理單一實例
             for name, data in self.placements.items():
                 if data['type'] == 'instance':
@@ -840,7 +843,7 @@ class GridBasedPlacer:
             ax.set_ylim(self.die_boundary.lly, self.die_boundary.ury)
         ax.set_aspect('equal')
         ax.grid(True, alpha=0.3)
-        
+
         if show_legend:
             legend_elements = [
                 patches.Patch(color='wheat', label='Hard Blocks'),
@@ -848,7 +851,8 @@ class GridBasedPlacer:
                 patches.Patch(color='lightgreen', alpha=0.6, label='I/O Pads'),
                 patches.Patch(color='lightgray', alpha=0.3, label='Core Area')
             ]
-            ax.legend(handles=legend_elements, loc='upper right', fontsize=10)
+            # 將圖例放在圖形外部右側，避免遮擋晶片
+            ax.legend(handles=legend_elements, loc='center left', bbox_to_anchor=(1.02, 0.5), fontsize=9)
 
     def visualize_initial_design(self):
         """視覺化原始設計佈局，不含網格和放置結果"""
@@ -856,15 +860,65 @@ class GridBasedPlacer:
             print("警告: 晶片邊界未載入，無法視覺化原始設計。")
             return
 
-        fig, ax = plt.subplots(1, 1, figsize=(13, 10))
+        fig, ax = plt.subplots(1, 1, figsize=(15, 10))
         self._draw_static_design_elements(ax)
-        ax.set_title('Initial Design Layout (Before Placement)', fontsize=14)
+        ax.set_title('Step 1: Initial Design Layout (After Loading Files)', fontsize=14, fontweight='bold')
         ax.set_xlabel('X (μm)', fontsize=12)
         ax.set_ylabel('Y (μm)', fontsize=12)
 
+        # 添加說明文字 - 放在底部左側，更小的字體和半透明背景
+        info_text = f"Die: {self.die_boundary.urx:.0f}x{self.die_boundary.ury:.0f} μm | "
+        info_text += f"Core: ({self.core_area.llx:.0f},{self.core_area.lly:.0f})-({self.core_area.urx:.0f},{self.core_area.ury:.0f}) | "
+        info_text += f"Blocks: {len(self.blocks)} | Blockages: {len(self.blockages)} | I/O Pads: {len(self.io_pads)}"
+        ax.text(0.02, 0.02, info_text, transform=ax.transAxes,
+                fontsize=9, verticalalignment='bottom',
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.7, edgecolor='gray'))
+
         plt.tight_layout()
-        plt.show(block=False) # 非阻塞模式，允許程式繼續執行
-        plt.pause(0.1) # 短暫暫停，確保圖形顯示
+        print("\n>>> Please close the figure window to continue to the next step...")
+        plt.show()  # 阻塞模式，等待用戶關閉
+
+    def visualize_grid_state(self):
+        """視覺化網格狀態圖"""
+        if self.grid_map is None:
+            print("警告: 網格地圖未建立，無法視覺化網格狀態。")
+            return
+
+        fig, ax = plt.subplots(1, 1, figsize=(16, 10))
+
+        # 定義顏色映射
+        colors = ['#90EE90', '#FF6B6B', '#FFE66D']  # 綠色(FREE), 紅色(BLOCKED), 黃色(RESERVED)
+        cmap = plt.matplotlib.colors.ListedColormap(colors)
+        bounds = [0, 1, 2, 3]
+        norm = plt.matplotlib.colors.BoundaryNorm(bounds, cmap.N)
+
+        # 顯示網格地圖
+        im = ax.imshow(self.grid_map, cmap=cmap, norm=norm, origin='lower',
+                      extent=[0, self.grid_width * self.grid_size,
+                              0, self.grid_height * self.grid_size],
+                      aspect='equal', interpolation='nearest')
+
+        # 添加網格線
+        ax.set_xticks(np.arange(0, self.grid_width * self.grid_size + 1, self.grid_size))
+        ax.set_yticks(np.arange(0, self.grid_height * self.grid_size + 1, self.grid_size))
+        ax.grid(True, which='both', color='gray', linewidth=0.5, alpha=0.5)
+
+        # 設置標題和標籤
+        ax.set_title(f'Step 2: Grid State Map (Grid Size: {self.grid_size} μm)', fontsize=14, fontweight='bold')
+        ax.set_xlabel('X (μm)', fontsize=12)
+        ax.set_ylabel('Y (μm)', fontsize=12)
+
+        # 添加圖例 - 放在圖形外部右側
+        legend_elements = [
+            patches.Patch(color='#90EE90', label='FREE - Available for placement'),
+            patches.Patch(color='#FF6B6B', label='BLOCKED - Occupied by blocks/blockages/core boundary'),
+            patches.Patch(color='#FFE66D', label='RESERVED - Reserved for instance groups')
+        ]
+        ax.legend(handles=legend_elements, loc='center left', bbox_to_anchor=(1.08, 0.5), fontsize=9)
+
+        plt.tight_layout()
+        print("\n>>> Please close the figure window to continue to constraint processing...")
+        plt.show()  # 阻塞模式，等待用戶關閉
 
     def _setup_placement_visualization(self):
         """初始化放置結果視覺化的圖形和子圖"""
@@ -872,8 +926,8 @@ class GridBasedPlacer:
             print("錯誤: 晶片邊界或網格地圖未載入，無法設置視覺化。")
             return
 
-        self.fig, (self.ax_grid, self.ax_placement) = plt.subplots(1, 2, figsize=(26, 13))
-        self.fig.suptitle('Placement Process Debugging', fontsize=16)
+        self.fig, (self.ax_grid, self.ax_placement) = plt.subplots(1, 2, figsize=(28, 13))
+        self.fig.suptitle('Step 3: Constraint Processing and Placement', fontsize=16, fontweight='bold')
 
         # --- 左圖：網格地圖 ---
         colors = ['#E0FFE0', '#FFCCCC', '#FFFFCC']  # FREE (淺綠), BLOCKED (淺紅), RESERVED (淺黃)
@@ -884,42 +938,45 @@ class GridBasedPlacer:
         self.grid_img = self.ax_grid.imshow(self.grid_map, cmap=cmap, norm=norm, origin='lower',
                                             extent=[0, self.grid_width * self.grid_size,
                                                     0, self.grid_height * self.grid_size])
-        self.ax_grid.set_title('Grid Map (0:Free, 1:Blocked, 2:Reserved) for Path Tracing', fontsize=14)
+        self.ax_grid.set_title('Grid Map (Real-time Update)', fontsize=14)
         self.ax_grid.set_xlabel('X (μm)', fontsize=12)
         self.ax_grid.set_ylabel('Y (μm)', fontsize=12)
         self.ax_grid.grid(True, alpha=0.3)
 
+        # 左圖圖例 - 放在圖形下方外部
         legend_elements_ax1 = [
             patches.Patch(color='#E0FFE0', label='Free (0)'),
             patches.Patch(color='#FFCCCC', label='Blocked (1)'),
             patches.Patch(color='#FFFFCC', label='Reserved (2)')
         ]
-        self.ax_grid.legend(handles=legend_elements_ax1, loc='upper right', fontsize=10)
+        self.ax_grid.legend(handles=legend_elements_ax1, loc='upper center',
+                           bbox_to_anchor=(0.5, -0.08), ncol=3, fontsize=9)
 
         # --- 右圖：放置結果 ---
         self._draw_static_design_elements(self.ax_placement, show_legend=False) # 繪製靜態元素作為背景，不顯示重複圖例
-        self.ax_placement.set_title('Placement Result with Constraint Targets', fontsize=14)
+        self.ax_placement.set_title('Placement Result with Constraint Visualization', fontsize=14)
         self.ax_placement.set_xlabel('X (μm)', fontsize=12)
         self.ax_placement.set_ylabel('Y (μm)', fontsize=12)
 
         # 初始化約束顏色映射
         self.cmap_constraints = plt.cm.get_cmap('hsv', len(self.constraints) + 1)
 
-        # 設置右圖的圖例
+        # 設置右圖的圖例 - 放在圖形下方外部，使用兩欄顯示
         legend_elements_ax2 = [
             patches.Patch(color='wheat', label='Hard Blocks'), # 重新加入靜態圖例
             patches.Patch(color='darkred', alpha=0.5, hatch='//', label='Blockages'),
             patches.Patch(color='lightgreen', alpha=0.6, label='I/O Pads'),
             patches.Patch(color='lightgray', alpha=0.3, label='Core Area'),
-            patches.Patch(color='gray', alpha=0.3, label='Instance Groups (Constraint Color)'),
-            plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='gray', markersize=8, label='Single Instances (Constraint Color)', markeredgecolor='black'),
-            plt.Line2D([0], [0], marker='x', color='gray', markersize=10, mew=2, linestyle='None', label='Constraint Target Point'),
-            plt.Line2D([0], [0], marker='o', color='gray', markersize=8, mew=1, linestyle='None', label='Pipe Start Point'),
-            plt.Line2D([0], [0], marker='s', color='gray', markersize=8, mew=1, linestyle='None', label='Pipe End Point')
+            patches.Patch(color='gray', alpha=0.3, label='Instance Groups'),
+            plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='gray', markersize=8, label='Single Instances', markeredgecolor='black'),
+            plt.Line2D([0], [0], marker='x', color='gray', markersize=10, mew=2, linestyle='None', label='Target Point'),
+            plt.Line2D([0], [0], marker='o', color='gray', markersize=8, mew=1, linestyle='None', label='Pipe Start'),
+            plt.Line2D([0], [0], marker='s', color='gray', markersize=8, mew=1, linestyle='None', label='Pipe End')
         ]
-        self.ax_placement.legend(handles=legend_elements_ax2, loc='upper right', fontsize=10)
+        self.ax_placement.legend(handles=legend_elements_ax2, loc='upper center',
+                                bbox_to_anchor=(0.5, -0.08), ncol=5, fontsize=9)
 
-        plt.tight_layout(rect=[0, 0.03, 1, 0.95]) # 調整佈局以容納suptitle
+        plt.tight_layout(rect=[0, 0.08, 1, 0.95]) # 調整佈局以容納suptitle和底部圖例
         plt.show(block=False) # 非阻塞模式
 
     def _update_placement_visualization(self, current_constraint_idx: int):
@@ -959,7 +1016,7 @@ class GridBasedPlacer:
                     artist_text = self.ax_placement.annotate(f'C{idx} End', (constraint.vis_end_point.x, constraint.vis_end_point.y), fontsize=7, color=color,
                                          xytext=(5, 5), textcoords='offset points', bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', boxstyle='round,pad=0.1'), zorder=10)
                     self.placement_artists.append(artist_text)
-                
+
                 # 繪製 pipe 路徑 (如果存在)
                 if constraint.vis_start_point and constraint.vis_end_point:
                     start_grid = constraint.vis_start_point.to_grid(self.grid_size)
@@ -976,7 +1033,7 @@ class GridBasedPlacer:
         for name, data in self.placements.items():
             constraint_idx = data.get('constraint_idx', -1)
             color = self.cmap_constraints(constraint_idx / len(self.constraints)) if constraint_idx != -1 else 'black'
-            
+
             if data['type'] == 'group':
                 region = data['region']
                 group_rect = patches.Rectangle(
@@ -1021,18 +1078,17 @@ class GridBasedPlacer:
         print("\n[1] Loading input files...")
         self.load_tvc_json(tvc_json)
         print(f"    ✓ Loaded design with {len(self.blocks)} blocks")
-        print(f"    ✓ Loaded {len(self.blockages)} blockages (will be marked as BLOCKED)")
+        print(f"    ✓ Loaded {len(self.blockages)} blockages")
 
         self.load_io_locations(io_locs)
         print(f"    ✓ Loaded {len(self.io_pads)} I/O pads")
 
         self.load_constraints(constraints)
         print(f"    ✓ Loaded {len(self.constraints)} constraints")
-        
-        # 新增的步驟：視覺化原始設計佈局
-        print("\n[1.5] Visualizing initial design layout...")
+
+        # 視覺化原始設計佈局 (步驟 1)
+        print("\n[VISUALIZATION] Step 1: Showing initial design layout...")
         self.visualize_initial_design()
-        #plt.close('all') # 關閉初始設計圖，為後續的動態圖騰出空間
 
         # 2. 建立網格
         print("\n[2] Building grid map...")
@@ -1047,24 +1103,31 @@ class GridBasedPlacer:
 
         print(f"    ✓ Initial Free grids: {free_grids}/{total_grids} "
               f"({100*free_grids/total_grids:.1f}%)")
-        print(f"    ✓ Initial Blocked grids (blocks, blockages, core edge): {blocked_grids} grids")
+        print(f"    ✓ Initial Blocked grids: {blocked_grids} grids")
+
+        # 視覺化網格狀態 (步驟 2)
+        print("\n[VISUALIZATION] Step 2: Showing grid state map...")
+        self.visualize_grid_state()
 
         # 3. 處理約束
-        print("\n[3] Processing constraints (with live visualization)...")
+        print("\n[3] Processing constraints with live visualization...")
+        print("    (Step 3: Dynamic constraint processing visualization)")
         # 在處理約束前，先設置好動態視覺化圖形
         self._setup_placement_visualization()
         self.process_constraints(debug_plot_interval) # 傳入間隔時間
-        
+
         # 處理完所有約束後，讓圖形保持顯示
-        print("\nAll constraints processed. Displaying final placement results.")
+        print("\n[VISUALIZATION] Final placement results")
         # 移除最後的約束標籤
         if self.current_constraint_text:
             self.current_constraint_text.remove()
             self.current_constraint_text = None
-        self.fig.suptitle('Final Placement Results', fontsize=16)
+        self.fig.suptitle('Final Placement Results', fontsize=16, fontweight='bold')
         self.fig.canvas.draw_idle()
         self.fig.canvas.flush_events()
-        plt.show(block=True) # 阻塞模式，讓使用者可以檢查最終結果後手動關閉
+
+        print("\n>>> Please close the figure window to generate output files...")
+        plt.show()  # 阻塞模式，讓使用者檢查最終結果
 
         # 4. 產生輸出
         print("\n[4] Generating outputs...")
@@ -1074,8 +1137,15 @@ class GridBasedPlacer:
         self.save_failed_list(failed_list)
         print(f"    ✓ Failed list: {failed_list}")
 
+        # 統計最終結果
+        print("\n[5] Summary:")
+        successful_placements = len(self.placements)
+        total_elements = sum(len(c.elements) for c in self.constraints)
+        print(f"    ✓ Successfully placed: {successful_placements} items")
+        print(f"    ✓ Failed constraints: {len(self.failed_constraints)}")
+
         print("\n" + "=" * 60)
-        print("✓ Complete!")
+        print("✓ Complete! All processing finished.")
         print("=" * 60)
 
 
@@ -1127,7 +1197,7 @@ def create_test_files_with_blockages():
         f.write("PAD_TOP {1000 1970 1030 1970 1030 2000 1000 2000}\n")
         f.write("PAD_BOT {1000 0 1030 0 1030 30 1000 30}\n")
 
-    # 約束檔案 (更新為新的格式)
+    # 約束檔案 (pipe 類型不需要 Element Type 行)
     with open('test_constraints.phy', 'w') as f:
         f.write("Preplace Type: close to target\n")
         f.write("Target Type: pin\n") # 使用 pin target
@@ -1171,19 +1241,19 @@ def create_test_files_with_blockages():
         f.write("Element Type: instancesgroup\n")
         f.write("Area: 50000.0\n\n") # 大一些的群組
 
-        f.write("Preplace Type: pipe\n") # 修改為 pipe
+        f.write("Preplace Type: pipe\n")  # pipe 類型
         f.write("Start: PAD_BOT\n")
         f.write("End: PAD_TOP\n")
         f.write("Stage1: u_dft/s_0 u_dft/s_1 u_dft/s_2\n")
-        f.write("Stage2: u_dft/s_3 u_dft/s_4 u_dft/s_5\n") # 跨越整個 Core
-        f.write("Element Type: single\n") # Element Type 和 Area 對 pipe 約束沒有實際作用，但為了兼容保留
+        f.write("Stage2: u_dft/s_3 u_dft/s_4 u_dft/s_5\n")
+        # 不需要 Element Type 行，因為 pipe 固定為 single
         f.write("Area: 20.0\n\n")
 
-        f.write("Preplace Type: pipe\n") # 修改為 pipe
+        f.write("Preplace Type: pipe\n")  # pipe 類型
         f.write("Start: u_test/inst1\n") # 以已放置的元件為起點
         f.write("End: u_test/inst5\n")   # 以已放置的元件為終點
         f.write("Stage1: u_dft_sub/s_0 u_dft_sub/s_1 u_dft_sub/s_2\n") # 短一些的 DFT 鏈
-        f.write("Element Type: single\n")
+        # 不需要 Element Type 行
         f.write("Area: 20.0\n\n")
 
         f.write("Preplace Type: close to target\n")
@@ -1193,7 +1263,7 @@ def create_test_files_with_blockages():
         f.write("Element Type: single\n")
         f.write("Area: 20.0\n\n")
 
-    print("Test files created with blockages!")
+    print("Test files created with blockages and updated pipe constraints!")
 
 
 # 使用範例
@@ -1206,7 +1276,7 @@ if __name__ == "__main__":
     if len(sys.argv) == 4:
         # 如果從命令行傳入參數，可以考慮讓用戶指定 root_module_name
         # 這裡簡化為直接使用預設值
-        placer = GridBasedPlacer(grid_size=50.0, root_module_name=ROOT_MODULE_NAME) 
+        placer = GridBasedPlacer(grid_size=50.0, root_module_name=ROOT_MODULE_NAME)
         placer.run(
             tvc_json=sys.argv[1],
             io_locs=sys.argv[2],
@@ -1227,4 +1297,3 @@ if __name__ == "__main__":
             constraints='test_constraints.phy',
             debug_plot_interval=0.5 # 設定每次更新的間隔時間 (秒)
         )
-
