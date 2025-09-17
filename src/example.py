@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-#!/usr/bin/env python3
 """
 Grid-Based Pre-placement Tool with Blockage Support
 使用網格結構和 A* 演算法的預放置工具
@@ -7,6 +6,7 @@ Grid-Based Pre-placement Tool with Blockage Support
 
 import json
 import numpy as np
+import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from dataclasses import dataclass, field
@@ -14,6 +14,10 @@ from typing import List, Tuple, Dict, Optional, Set
 import heapq
 import re
 import time # 引入 time 模組用於暫停
+
+# 檢測 matplotlib 版本以使用正確的 API
+MATPLOTLIB_VERSION = tuple(map(int, matplotlib.__version__.split('.')[:2]))
+USE_NEW_CMAP_API = MATPLOTLIB_VERSION >= (3, 7)
 
 @dataclass
 class Point:
@@ -97,6 +101,7 @@ class Constraint:
     vis_target_point: Optional[Point] = None # close_to_target 實際解析出的目標點
     vis_start_point: Optional[Point] = None  # pipe 實際解析出的起點
     vis_end_point: Optional[Point] = None    # pipe 實際解析出的終點
+    vis_pipe_path: Optional[List[Tuple[int, int]]] = None  # pipe 實際使用的路徑
 
     def __str__(self):
         if self.type == 'close_to_target':
@@ -755,6 +760,9 @@ class GridBasedPlacer:
                     path = self.a_star_path(start_grid, end_grid)
 
                     if path:
+                        # 保存實際使用的路徑供視覺化使用
+                        constraint.vis_pipe_path = path
+
                         num_elements = len(constraint.elements)
                         if num_elements == 0:
                             self._update_placement_visualization(idx) # 更新視覺化
@@ -966,7 +974,7 @@ class GridBasedPlacer:
         plt.show()  # 阻塞模式，等待用戶關閉
 
     def visualize_grid_state(self):
-        """視覺化網格狀態圖"""
+        """視覺化網格狀態圖 - 優化刻度顯示"""
         if self.grid_map is None:
             print("警告: 網格地圖未建立，無法視覺化網格狀態。")
             return
@@ -985,10 +993,47 @@ class GridBasedPlacer:
                               0, self.grid_height * self.grid_size],
                       aspect='equal', interpolation='nearest')
 
-        # 添加網格線
-        ax.set_xticks(np.arange(0, self.grid_width * self.grid_size + 1, self.grid_size))
-        ax.set_yticks(np.arange(0, self.grid_height * self.grid_size + 1, self.grid_size))
-        ax.grid(True, which='both', color='gray', linewidth=0.5, alpha=0.5)
+        # 優化刻度顯示 - 減少刻度數量
+        # X軸：根據寬度決定刻度間隔
+        x_max = self.grid_width * self.grid_size
+        if x_max <= 1000:
+            x_tick_interval = 100  # 每100微米一個刻度
+        elif x_max <= 5000:
+            x_tick_interval = 250  # 每250微米一個刻度
+        elif x_max <= 10000:
+            x_tick_interval = 500  # 每500微米一個刻度
+        else:
+            x_tick_interval = 1000  # 每1000微米一個刻度
+
+        # Y軸：根據高度決定刻度間隔
+        y_max = self.grid_height * self.grid_size
+        if y_max <= 1000:
+            y_tick_interval = 100
+        elif y_max <= 5000:
+            y_tick_interval = 250
+        elif y_max <= 10000:
+            y_tick_interval = 500
+        else:
+            y_tick_interval = 1000
+
+        # 設置主要刻度
+        x_ticks = np.arange(0, x_max + 1, x_tick_interval)
+        y_ticks = np.arange(0, y_max + 1, y_tick_interval)
+        ax.set_xticks(x_ticks)
+        ax.set_yticks(y_ticks)
+
+        # 添加次要刻度（網格線），但不顯示標籤
+        x_minor_ticks = np.arange(0, x_max + 1, self.grid_size)
+        y_minor_ticks = np.arange(0, y_max + 1, self.grid_size)
+        ax.set_xticks(x_minor_ticks, minor=True)
+        ax.set_yticks(y_minor_ticks, minor=True)
+
+        # 設置網格線樣式
+        ax.grid(True, which='major', color='black', linewidth=0.8, alpha=0.7)
+        ax.grid(True, which='minor', color='gray', linewidth=0.3, alpha=0.3)
+
+        # 旋轉x軸標籤以避免重疊（如果需要）
+        plt.setp(ax.xaxis.get_majorticklabels(), rotation=0, ha='center')
 
         # 設置標題和標籤
         ax.set_title(f'Step 2: Grid State Map (Grid Size: {self.grid_size} μm)', fontsize=14, fontweight='bold')
@@ -1002,6 +1047,19 @@ class GridBasedPlacer:
             patches.Patch(color='#FFE66D', label='RESERVED - Reserved for instance groups')
         ]
         ax.legend(handles=legend_elements, loc='center left', bbox_to_anchor=(1.08, 0.5), fontsize=9)
+
+        # 添加統計資訊
+        free_count = np.sum(self.grid_map == self.GRID_FREE)
+        blocked_count = np.sum(self.grid_map == self.GRID_BLOCKED)
+        reserved_count = np.sum(self.grid_map == self.GRID_RESERVED)
+        total_count = self.grid_width * self.grid_height
+
+        stats_text = f"Grid Stats: FREE={free_count} ({100*free_count/total_count:.1f}%), "
+        stats_text += f"BLOCKED={blocked_count} ({100*blocked_count/total_count:.1f}%), "
+        stats_text += f"RESERVED={reserved_count}"
+        ax.text(0.02, 0.98, stats_text, transform=ax.transAxes,
+                fontsize=9, verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8, edgecolor='gray'))
 
         plt.tight_layout()
         print("\n>>> Please close the figure window to continue to constraint processing...")
@@ -1045,10 +1103,14 @@ class GridBasedPlacer:
         self.ax_placement.set_xlabel('X (μm)', fontsize=12)
         self.ax_placement.set_ylabel('Y (μm)', fontsize=12)
 
-        # 初始化約束顏色映射
-        self.cmap_constraints = plt.cm.get_cmap('hsv', len(self.constraints) + 1)
+        if USE_NEW_CMAP_API:
+            # 新版本 Matplotlib (>= 3.7)
+            self.cmap_constraints = plt.colormaps['hsv'].resampled(len(self.constraints) + 1)
+        else:
+            # 舊版本 Matplotlib (< 3.7)
+            self.cmap_constraints = plt.cm.get_cmap('hsv', len(self.constraints) + 1)
 
-        # 設置右圖的圖例 - 放在圖形下方外部，使用兩欄顯示
+        # 設置右圖的圖例 - 放在圖形下方外部，使用兩欄顯示 (更新 Pipe Start 為三角形)
         legend_elements_ax2 = [
             patches.Patch(color='wheat', label='Hard Blocks'), # 重新加入靜態圖例
             patches.Patch(color='darkred', alpha=0.5, hatch='//', label='Blockages'),
@@ -1057,7 +1119,7 @@ class GridBasedPlacer:
             patches.Patch(color='gray', alpha=0.3, label='Instance Groups'),
             plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='gray', markersize=8, label='Single Instances', markeredgecolor='black'),
             plt.Line2D([0], [0], marker='x', color='gray', markersize=10, mew=2, linestyle='None', label='Target Point'),
-            plt.Line2D([0], [0], marker='o', color='gray', markersize=8, mew=1, linestyle='None', label='Pipe Start'),
+            plt.Line2D([0], [0], marker='^', color='gray', markersize=8, mew=1, linestyle='None', label='Pipe Start'),  # 改為三角形
             plt.Line2D([0], [0], marker='s', color='gray', markersize=8, mew=1, linestyle='None', label='Pipe End')
         ]
         self.ax_placement.legend(handles=legend_elements_ax2, loc='upper center',
@@ -1067,7 +1129,6 @@ class GridBasedPlacer:
         plt.show(block=False) # 非阻塞模式
 
     def _update_placement_visualization(self, current_constraint_idx: int):
-        """更新放置結果視覺化圖形"""
         if self.fig is None:
             return
 
@@ -1092,7 +1153,7 @@ class GridBasedPlacer:
                 #self.placement_artists.append(artist_text)
             elif constraint.type == 'pipe':
                 if constraint.vis_start_point:
-                    artist = self.ax_placement.plot(constraint.vis_start_point.x, constraint.vis_start_point.y, 'o', color=color, markersize=8, mew=1, zorder=10)[0]
+                    artist = self.ax_placement.plot(constraint.vis_start_point.x, constraint.vis_start_point.y, '^', color=color, markersize=8, mew=1, zorder=10)[0]
                     self.placement_artists.append(artist)
                     artist_text = self.ax_placement.annotate(f'C{idx} Start', (constraint.vis_start_point.x, constraint.vis_start_point.y), fontsize=7, color=color,
                                          xytext=(5, 5), textcoords='offset points', bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', boxstyle='round,pad=0.1'), zorder=10)
@@ -1104,16 +1165,13 @@ class GridBasedPlacer:
                                          xytext=(5, 5), textcoords='offset points', bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', boxstyle='round,pad=0.1'), zorder=10)
                     #self.placement_artists.append(artist_text)
 
-                # 繪製 pipe 路徑 (如果存在)
-                if constraint.vis_start_point and constraint.vis_end_point:
-                    start_grid = constraint.vis_start_point.to_grid(self.grid_size)
-                    end_grid = constraint.vis_end_point.to_grid(self.grid_size)
-                    path = self.a_star_path(start_grid, end_grid)
-                    if path:
-                        path_coords_x = [(p[0] + 0.5) * self.grid_size for p in path]
-                        path_coords_y = [(p[1] + 0.5) * self.grid_size for p in path]
-                        line, = self.ax_placement.plot(path_coords_x, path_coords_y, color=color, linestyle='--', linewidth=1, alpha=0.7, zorder=9)
-                        self.placement_artists.append(line)
+                # 繪製 pipe 路徑 (如果存在) - 使用實際保存的路徑
+                if constraint.vis_pipe_path:
+                    path = constraint.vis_pipe_path
+                    path_coords_x = [(p[0] + 0.5) * self.grid_size for p in path]
+                    path_coords_y = [(p[1] + 0.5) * self.grid_size for p in path]
+                    line, = self.ax_placement.plot(path_coords_x, path_coords_y, color=color, linestyle='--', linewidth=1, alpha=0.7, zorder=9)
+                    self.placement_artists.append(line)
 
 
         # 重新繪製放置結果
@@ -1425,3 +1483,4 @@ if __name__ == "__main__":
             constraints='test_constraints.phy',
             debug_plot_interval=0.5 # 設定每次更新的間隔時間 (秒)
         )
+
