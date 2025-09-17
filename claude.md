@@ -16,13 +16,14 @@
   - Step 2: 網格狀態地圖
   - Step 3: 即時約束處理和放置結果
 - **完整的障礙物處理**：支援硬區塊（hard blocks）和阻擋區域（blockages）
+- **整合式 I/O 和 MP_SENSOR 處理**：直接從 TVC JSON 載入所有設計元件
 
 ## 🚀 快速開始
 
 ### 基本用法
 
 ```bash
-python example.py <tvc.json> <io_locs.txt> <constraints.phy>
+python example.py <tvc.json> <constraints.phy>
 ```
 
 ### 測試模式
@@ -37,12 +38,18 @@ python example.py
 
 ### 1. TVC JSON 檔案
 
-包含晶片設計的幾何資訊，注意根模組名稱必須與程式設定匹配（預設為 `SoIC_A16_eTV5_root`）：
+包含晶片設計的完整資訊，包括幾何、I/O pads、MP_SENSOR 等。注意根模組名稱必須與程式設定匹配（預設為 `uDue1/u_socss_0`）：
 
 ```json
 {
+  "IPS": {
+    "IP_NAME": {
+      "SIZE_X": 100.0,
+      "SIZE_Y": 100.0
+    }
+  },
   "S1_output": {
-    "SoIC_A16_eTV5_root": {  // 根模組名稱，必須與程式設定匹配
+    "uDue1/u_socss_0": {  // 根模組名稱，必須與程式設定匹配
       "TOPShape": {
         "Name": "chip_name",
         "DieCoords": [[x1,y1], [x2,y2], [x3,y3], [x4,y4]],
@@ -60,21 +67,37 @@ python example.py
         "Attribute": "Module"
       }]
     }
+  },
+  "Solution_GPIO": {
+    "uDue1/u_socss_0": {
+      "GPIO": [{
+        "Name": "pad_name",
+        "Location": [llx, lly],
+        "Orientation": "R0",
+        "CellName": "PAD_CELL_TYPE"
+      }]
+    }
+  },
+  "Solution_MP_SENSOR": {
+    "uDue1/u_socss_0": {
+      "MP_SENSOR": [{
+        "Name": "sensor_name",
+        "Location": [llx, lly],
+        "CellName": "SENSOR_TYPE"
+      }]
+    }
   }
 }
 ```
 
-### 2. I/O 位置檔案 (io_locs.txt)
+#### 重要組成部分：
 
-定義 I/O pad 的位置：
+- **IPS**：定義所有 IP 元件的尺寸，用於計算 I/O pads 和 MP_SENSOR 的實際大小
+- **S1_output**：包含晶片的主要幾何資訊
+- **Solution_GPIO**：定義所有 I/O pads 的位置和類型
+- **Solution_MP_SENSOR**：定義所有 MP sensor 的位置和類型
 
-```
-PAD_NAME {{x1 y1 x2 y2 x3 y3 x4 y4}}
-PAD_IN {0 500 30 500 30 530 0 530}
-PAD_OUT {2970 500 3000 500 3000 530 2970 530}
-```
-
-### 3. 約束檔案 (constraints.phy)
+### 2. 約束檔案 (constraints.phy)
 
 #### Close-to-Target 約束
 
@@ -115,7 +138,7 @@ Area: 20.0
 ```python
 placer = GridBasedPlacer(
     grid_size=50.0,           # 網格大小（微米）
-    root_module_name="SoIC_A16_eTV5_root"  # 根模組名稱（必須與 TVC JSON 匹配）
+    root_module_name="uDue1/u_socss_0"  # 根模組名稱（必須與 TVC JSON 匹配）
 )
 ```
 
@@ -123,8 +146,7 @@ placer = GridBasedPlacer(
 
 | 方法 | 說明 |
 |------|------|
-| `load_tvc_json()` | 載入設計幾何資訊 |
-| `load_io_locations()` | 載入 I/O pad 位置 |
+| `load_tvc_json()` | 載入設計幾何資訊、I/O pads、MP sensors |
 | `load_constraints()` | 載入放置約束 |
 | `build_grid_map()` | 建立網格地圖 |
 | `process_constraints()` | 處理所有約束並執行放置 |
@@ -169,6 +191,14 @@ class Blockage:
     boundary: Rectangle
 ```
 
+#### IOPad
+```python
+@dataclass
+class IOPad:
+    name: str
+    boundary: Rectangle
+```
+
 #### Constraint
 ```python
 @dataclass
@@ -186,7 +216,7 @@ class Constraint:
 
 #### Step 1: Initial Design Layout
 - 顯示原始設計佈局
-- 包含晶片邊界、核心區域、硬區塊、阻擋區域和 I/O pads
+- 包含晶片邊界、核心區域、硬區塊、阻擋區域、I/O pads 和 MP sensors
 - 顯示設計統計資訊
 - 關閉視窗後繼續下一步
 
@@ -303,7 +333,6 @@ placer = GridBasedPlacer(
 ```python
 placer.run(
     tvc_json='design.json',
-    io_locs='io.txt',
     constraints='constraints.phy',
     debug_plot_interval=1.0  # 每個約束處理後暫停 1 秒
 )
@@ -314,7 +343,6 @@ placer.run(
 ```python
 placer.run(
     tvc_json='input.json',
-    io_locs='io.txt',
     constraints='constraints.phy',
     output_tcl='custom_placement.tcl',
     failed_list='custom_failed.list'
@@ -331,28 +359,36 @@ placer.run(
 
 1. **檢查根模組名稱**：確保程式中的 `root_module_name` 與 TVC JSON 檔案中的鍵名完全匹配
 2. **檢查輸入檔案格式**：確保 JSON 格式正確，座標合理
-3. **觀察三步驟視覺化**：
-   - Step 1: 確認設計載入正確
+3. **確認 IP 尺寸定義**：確保所有 I/O pads 和 MP sensors 的 CellName 在 IPS 區塊中有對應的尺寸定義
+4. **觀察三步驟視覺化**：
+   - Step 1: 確認設計載入正確，包括 I/O pads 和 MP sensors
    - Step 2: 確認網格地圖正確標記障礙物
    - Step 3: 即時觀察約束處理過程
-4. **檢視失敗列表**：了解哪些約束無法滿足及原因
-5. **調整網格大小**：如果放置失敗過多，嘗試減小網格大小
-6. **使用測試模式**：先用內建測試案例驗證工具功能
+5. **檢視失敗列表**：了解哪些約束無法滿足及原因
+6. **調整網格大小**：如果放置失敗過多，嘗試減小網格大小
+7. **使用測試模式**：先用內建測試案例驗證工具功能
 
 ## 📝 注意事項
 
-1. **根模組名稱**：預設為 `"SoIC_A16_eTV5_root"`，必須與 TVC JSON 中的鍵名匹配
+1. **根模組名稱**：預設為 `"uDue1/u_socss_0"`，必須與 TVC JSON 中的鍵名匹配
 2. **座標系統**：所有座標單位為微米（μm）
 3. **約束順序**：約束按檔案中的順序處理，pipe 約束可能依賴先前的放置結果
 4. **Core Area**：只能在核心區域內放置元件
 5. **Blockages**：會被標記為 GRID_BLOCKED，無法放置元件
-6. **視覺化視窗**：每個步驟結束後需手動關閉視窗才能繼續
+6. **I/O Pads 和 MP Sensors**：從 TVC JSON 自動載入，作為可參考的目標但不可覆蓋
+7. **視覺化視窗**：每個步驟結束後需手動關閉視窗才能繼續
 
 ## 🔄 更新歷史
 
+### 最新更新
+- **簡化輸入檔案**：移除獨立的 I/O 位置檔案，整合到 TVC JSON
+- **新增 MP_SENSOR 支援**：自動從 Solution_MP_SENSOR 載入並處理
+- **改進 I/O pads 處理**：從 Solution_GPIO 自動載入
+- **更新預設根模組名稱**：改為 `uDue1/u_socss_0`
+
+### 先前更新
 - 改進三步驟視覺化流程，提供更清晰的除錯體驗
 - 優化圖例位置和資訊顯示
-- 更新預設根模組名稱為 `SoIC_A16_eTV5_root`
 - 支援 blockages 處理
 - 新增 pipe 約束類型
 - 改進視覺化系統
@@ -366,8 +402,10 @@ placer.run(
 1. Python 版本 >= 3.8
 2. 必要套件：numpy, matplotlib
 3. 輸入檔案格式是否正確
-4. 根模組名稱是否匹配（預設：`SoIC_A16_eTV5_root`）
-5. 視覺化視窗是否正確關閉以繼續流程
+4. 根模組名稱是否匹配（預設：`uDue1/u_socss_0`）
+5. IPS 區塊中是否包含所有必要的尺寸定義
+6. Solution_GPIO 和 Solution_MP_SENSOR 區塊是否存在且格式正確
+7. 視覺化視窗是否正確關閉以繼續流程
 
 ---
 
