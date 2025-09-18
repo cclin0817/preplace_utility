@@ -2,6 +2,7 @@
 """
 Grid-Based Pre-placement Tool with Blockage Support
 使用網格結構和 A* 演算法的預放置工具
+Modified to process close_to_target first, then pipe
 """
 
 import json
@@ -146,6 +147,7 @@ class GridBasedPlacer:
         # 約束和放置結果
         self.constraints: List[Constraint] = []
         self.placements: Dict[str, any] = {} # 儲存實際放置的元件或群組資訊
+        self.instance_locations: Dict[str, Point] = {}
         self.failed_constraints: List[str] = []
 
         # 網格狀態定義
@@ -589,13 +591,7 @@ class GridBasedPlacer:
                             ur_grid_x * self.grid_size,
                             ur_grid_y * self.grid_size
                         )
-                        # 如果找到的區域非常接近目標點，可以提前返回
-                        if dist_sq < (self.grid_size * 2)**2: # 距離目標點 2 個 grid_size 內
-                            # 標記區域為已保留
-                            for y_grid in range(ll_grid_y, ur_grid_y):
-                                for x_grid in range(ll_grid_x, ur_grid_x):
-                                    self.grid_map[y_grid, x_grid] = self.GRID_RESERVED
-                            return best_region_rect
+
             if best_region_rect: # 如果當前 radius 找到了至少一個 region，就不再擴大 radius 搜尋
                 break # 確保找到的是最靠近的，而不是最遠的
 
@@ -611,40 +607,71 @@ class GridBasedPlacer:
 
         return best_region_rect
 
+    def get_instance_position(self, inst_name: str) -> Optional[Point]:
+        """
+        Get the position of an instance.
+        First check instance_locations (for individual instances and group members),
+        then check blocks and IO pads.
+        """
+        # Check in instance_locations first (includes both single instances and group members)
+        if inst_name in self.instance_locations:
+            return self.instance_locations[inst_name]
 
-    def process_constraints(self, debug_plot_interval: float = 0.01):
-        """處理所有約束，並在每次處理後更新視覺化"""
+        # Check in blocks
+        if inst_name in self.blocks:
+            return self.blocks[inst_name].boundary.center()
+
+        # Check in IO pads
+        if inst_name in self.io_pads:
+            return self.io_pads[inst_name].boundary.center()
+
+        return None
+
+    def process_constraints(self):
+        """
+        Process constraints in order: first all close_to_target, then all pipe.
+        Update visualization after each constraint.
+        """
         group_id = 0
 
-        # 初始化視覺化 (如果尚未初始化)
+        # Sort constraints: close_to_target first, then pipe
+        sorted_constraints = sorted(self.constraints,
+                                   key=lambda c: 0 if c.type == 'close_to_target' else 1)
+        self.constraints = sorted_constraints
+
+        # Initialize visualization (if not already initialized)
         if self.fig is None:
             self._setup_placement_visualization()
 
         for idx, constraint in enumerate(self.constraints):
-            #print(f"處理約束 C{idx}: Type={constraint.type}, Elements={constraint.elements}")
             print(f"處理約束 C{idx}: {constraint}")
-            # 更新當前約束的文字標籤 - 放在上方中央避免遮擋
+
+            # Update current constraint text label
             if self.current_constraint_text:
                 self.current_constraint_text.remove()
             self.current_constraint_text = self.ax_placement.text(
                 0.5, 0.98, f"Processing C{idx}: {constraint.type}",
                 transform=self.ax_placement.transAxes, va='top', ha='center',
-                fontsize=12, color='red', bbox=dict(facecolor='yellow', alpha=0.9, edgecolor='red', boxstyle='round,pad=0.3')
+                fontsize=12, color='red',
+                bbox=dict(facecolor='yellow', alpha=0.9, edgecolor='red', boxstyle='round,pad=0.3')
             )
 
             try:
                 if constraint.type == 'close_to_target':
                     target_point = self.get_target_point_for_constraint(constraint)
-                    print('target_point', target_point)
+
                     if not target_point:
                         self.failed_constraints.append(
-                            f"Constraint C{idx} for elements {constraint.elements}: Target '{constraint.target_name or str(constraint.target_coords)}' not found or invalid."
+                            f"Constraint C{idx} for elements {constraint.elements}: "
+                            f"Target '{constraint.target_name or str(constraint.target_coords)}' not found or invalid."
                         )
-                        self.ax_placement.text(target_point.x, target_point.y, "Failed!", color='red', fontsize=8, ha='center', va='center')
-                        self._update_placement_visualization(idx) # 更新視覺化
-                        time.sleep(debug_plot_interval)
+                        if target_point:  # This check is redundant but kept for safety
+                            self.ax_placement.text(target_point.x, target_point.y, "Failed!",
+                                                 color='red', fontsize=8, ha='center', va='center')
+                        self._update_placement_visualization(idx)
                         continue
-                    constraint.vis_target_point = target_point # 儲存用於視覺化
+
+                    constraint.vis_target_point = target_point
 
                     if constraint.element_type == 'instancesgroup':
                         group_name = f"TVC_INST_GROUP_{group_id}"
@@ -659,15 +686,23 @@ class GridBasedPlacer:
                                 'instances': constraint.elements,
                                 'constraint_idx': idx
                             }
+
+                            # NEW: Record each instance in the group at the center of the region
+                            center_point = region.center()
+                            for element in constraint.elements:
+                                self.instance_locations[element] = center_point
+                                print(f"  → Placed {element} in group {group_name} at center {center_point}")
                         else:
                             self.failed_constraints.append(
-                                f"Constraint C{idx} ({group_name}, elements: {constraint.elements}): Cannot allocate region for area {constraint.area} (no free space found)."
+                                f"Constraint C{idx} ({group_name}, elements: {constraint.elements}): "
+                                f"Cannot allocate region for area {constraint.area} (no free space found)."
                             )
-                    else: # single instance
+
+                    else:  # single instance
                         position_grid = self.find_nearest_free_grid(target_point)
 
                         if position_grid:
-                            # 將找到的網格標記為 BLOCKED，避免其他單一實例重複佔用
+                            # Mark grid as BLOCKED
                             self.grid_map[position_grid[1], position_grid[0]] = self.GRID_BLOCKED
 
                             position = Point(
@@ -680,6 +715,9 @@ class GridBasedPlacer:
                                     'position': position,
                                     'constraint_idx': idx
                                 }
+                                # NEW: Record instance location
+                                self.instance_locations[element] = position
+                                print(f"  → Placed {element} at {position}")
                         else:
                             for element in constraint.elements:
                                 self.failed_constraints.append(
@@ -688,27 +726,12 @@ class GridBasedPlacer:
                                 )
 
                 elif constraint.type == 'pipe':
-                    start_pos = None
-                    end_pos = None
+                    # Get start and end positions from previously placed instances
+                    start_pos = self.get_instance_position(constraint.start)
+                    end_pos = self.get_instance_position(constraint.end)
 
-                    # 嘗試從已放置的元件中獲取起點和終點
-                    if constraint.start in self.placements and 'position' in self.placements[constraint.start]:
-                        start_pos = self.placements[constraint.start]['position']
-                    elif constraint.start in self.blocks:
-                        start_pos = self.blocks[constraint.start].boundary.center()
-                    elif constraint.start in self.io_pads:
-                        start_pos = self.io_pads[constraint.start].boundary.center()
-
-                    if constraint.end in self.placements and 'position' in self.placements[constraint.end]:
-                        end_pos = self.placements[constraint.end]['position']
-                    elif constraint.end in self.blocks:
-                        end_pos = self.blocks[constraint.end].boundary.center()
-                    elif constraint.end in self.io_pads:
-                        end_pos = self.io_pads[constraint.end].boundary.center()
-
-                    # 如果起點或終點未被找到，則使用 Core Area 內的預設點
+                    # If start or end not found, use fallback positions
                     if not start_pos:
-                        # 嘗試在 core_area 內找一個 free grid
                         start_grid_candidate = self.find_nearest_free_grid(Point(
                             self.core_area.llx + self.grid_size,
                             self.core_area.lly + self.grid_size
@@ -718,15 +741,15 @@ class GridBasedPlacer:
                                 (start_grid_candidate[0] + 0.5) * self.grid_size,
                                 (start_grid_candidate[1] + 0.5) * self.grid_size
                             )
-                        else: # 如果連 core area 內都找不到 free grid
+                        else:
                             start_pos = Point(
                                 self.core_area.llx + self.grid_size,
                                 self.core_area.lly + self.grid_size
                             )
-                        print(f"警告: Constraint C{idx}: Start element '{constraint.start}' not found or placed, using a point near ({start_pos.x:.2f}, {start_pos.y:.2f}).")
+                        print(f"警告: Constraint C{idx}: Start element '{constraint.start}' not found or placed, "
+                              f"using a point near ({start_pos.x:.2f}, {start_pos.y:.2f}).")
 
                     if not end_pos:
-                        # 嘗試在 core_area 內找一個 free grid
                         end_grid_candidate = self.find_nearest_free_grid(Point(
                             self.core_area.urx - self.grid_size,
                             self.core_area.ury - self.grid_size
@@ -736,12 +759,13 @@ class GridBasedPlacer:
                                 (end_grid_candidate[0] + 0.5) * self.grid_size,
                                 (end_grid_candidate[1] + 0.5) * self.grid_size
                             )
-                        else: # 如果連 core area 內都找不到 free grid
+                        else:
                             end_pos = Point(
                                 self.core_area.urx - self.grid_size,
                                 self.core_area.ury - self.grid_size
                             )
-                        print(f"警告: Constraint C{idx}: End element '{constraint.end}' not found or placed, using a point near ({end_pos.x:.2f}, {end_pos.y:.2f}).")
+                        print(f"警告: Constraint C{idx}: End element '{constraint.end}' not found or placed, "
+                              f"using a point near ({end_pos.x:.2f}, {end_pos.y:.2f}).")
 
                     constraint.vis_start_point = start_pos
                     constraint.vis_end_point = end_pos
@@ -753,32 +777,29 @@ class GridBasedPlacer:
                         self.failed_constraints.append(
                             f"Constraint C{idx} (pipe for {constraint.elements}): Could not find free start or end grid."
                         )
-                        self._update_placement_visualization(idx) # 更新視覺化
-                        time.sleep(debug_plot_interval)
+                        self._update_placement_visualization(idx)
                         continue
 
                     path = self.a_star_path(start_grid, end_grid)
 
                     if path:
-                        # 保存實際使用的路徑供視覺化使用
+                        # Save the actual path for visualization
                         constraint.vis_pipe_path = path
 
                         num_elements = len(constraint.elements)
                         if num_elements == 0:
-                            self._update_placement_visualization(idx) # 更新視覺化
-                            time.sleep(debug_plot_interval)
+                            self._update_placement_visualization(idx)
                             continue
 
+                        # Distribute instances along the path
                         positions = []
-                        # 確保至少有 num_elements + 1 個間隔，讓元件可以分散
-                        # 如果路徑太短，讓每個元件盡可能分散
                         path_step = max(1, len(path) // (num_elements + 1))
 
                         for i in range(num_elements):
                             idx_on_path = min((i + 1) * path_step, len(path) - 1)
                             grid_point = path[idx_on_path]
 
-                            # 將路徑上的網格點標記為 BLOCKED
+                            # Mark grid as BLOCKED
                             if self.grid_map[grid_point[1], grid_point[0]] == self.GRID_FREE:
                                 self.grid_map[grid_point[1], grid_point[0]] = self.GRID_BLOCKED
 
@@ -787,45 +808,53 @@ class GridBasedPlacer:
                                 (grid_point[1] + 0.5) * self.grid_size
                             ))
 
+                        # Place each instance and record its location
                         for element, pos in zip(constraint.elements, positions):
                             self.placements[element] = {
                                 'type': 'instance',
                                 'position': pos,
                                 'constraint_idx': idx
                             }
+                            # NEW: Record instance location
+                            self.instance_locations[element] = pos
+                            print(f"  → Placed {element} at {pos} (pipe)")
                     else:
                         self.failed_constraints.append(
-                            f"Constraint C{idx} (pipe for {constraint.elements}): Cannot find a path from {start_grid} to {end_grid} (no free path)."
+                            f"Constraint C{idx} (pipe for {constraint.elements}): "
+                            f"Cannot find a path from {start_grid} to {end_grid} (no free path)."
                         )
 
             except Exception as e:
-                #self.failed_constraints.append(f"Constraint C{idx} {constraint.type} processing error for {constraint.elements}: {str(e)}")
                 import traceback
-                traceback.print_exc()  # 會顯示完整的錯誤堆疊
+                traceback.print_exc()
                 print(f"Constraint C{idx} processing error: {str(e)}")
-                self.failed_constraints.append(f"Constraint C{idx} processing error for {constraint.elements}: {str(e)}")
+                self.failed_constraints.append(
+                    f"Constraint C{idx} processing error for {constraint.elements}: {str(e)}"
+                )
 
-            # 每處理一個約束就更新視覺化
+            # Update visualization after each constraint
             self._update_placement_visualization(idx)
-            time.sleep(debug_plot_interval) # 暫停一段時間以便觀察
 
-        # 移除最後一個約束文字標籤
+        # Remove the last constraint text label
         if self.current_constraint_text:
             self.current_constraint_text.remove()
             self.current_constraint_text = None
-        self.fig.canvas.draw_idle() # 確保最後的更新顯示出來
+        self.fig.canvas.draw_idle()
         self.fig.canvas.flush_events()
 
 
     def generate_tcl_script(self, filepath: str):
-        """產生 Innovus TCL 腳本"""
+        """
+        Generate Innovus TCL script.
+        For groups, only the group is output.
+        For individual instances, output placeInstance commands.
+        """
         with open(filepath, 'w') as f:
             f.write("# Pre-placement TCL Script\n")
             f.write("# Generated by Grid-Based Placer\n")
             f.write(f"# Grid Size: {self.grid_size} um\n")
-            f.write(f"# Blockages: {len(self.blockages)}\n\n")
 
-            # 先處理群組，因為群組需要先定義才能 addInstToInstGroup
+            # Process groups first
             for name, data in self.placements.items():
                 if data['type'] == 'group':
                     region = data['region']
@@ -833,13 +862,20 @@ class GridBasedPlacer:
                     f.write(f"createInstGroup {name} -region "
                            f"{region.llx:.2f} {region.lly:.2f} "
                            f"{region.urx:.2f} {region.ury:.2f}\n")
-                    # 將實例加入群組 (確保這些實例在 Innovus 中是存在的)
+                    # Add instances to group
                     instances = " ".join(data['instances'])
                     f.write(f"addInstToInstGroup {name} {{ {instances} }}\n\n")
 
-            # 再處理單一實例
+            # Process single instances (not outputting group members individually)
+            processed_instances = set()
             for name, data in self.placements.items():
-                if data['type'] == 'instance':
+                if data['type'] == 'group':
+                    # Mark all instances in this group as processed
+                    processed_instances.update(data['instances'])
+
+            # Output placeInstance commands for non-group instances
+            for name, data in self.placements.items():
+                if data['type'] == 'instance' and name not in processed_instances:
                     pos = data['position']
                     f.write(f"placeInstance {name} "
                            f"{pos.x:.2f} {pos.y:.2f} -softFixed\n")
@@ -888,8 +924,6 @@ class GridBasedPlacer:
 
             cx = blockage.boundary.center().x
             cy = blockage.boundary.center().y
-            #ax.text(cx, cy, blockage.name, ha='center', va='center',
-            #        fontsize=8, color='white', weight='bold')
 
         # 區塊
         for block in self.blocks.values():
@@ -902,7 +936,6 @@ class GridBasedPlacer:
             ax.add_patch(block_rect)
             cx = block.boundary.center().x
             cy = block.boundary.center().y
-            #ax.text(cx, cy, block.name, ha='center', va='center', fontsize=8)
 
             # 繪製 Pin Box (深灰色)
             if block.pin_box:
@@ -914,10 +947,8 @@ class GridBasedPlacer:
                     linestyle='--' # 虛線更容易區分
                 )
                 ax.add_patch(pin_box_rect)
-                # 可選：在 Pin Box 中心標註
                 pin_cx = block.pin_box.center().x
                 pin_cy = block.pin_box.center().y
-                #ax.text(pin_cx, pin_cy, 'Pin', ha='center', va='center', fontsize=6, color='white', alpha=0.8)
 
 
         # I/O pads
@@ -931,7 +962,6 @@ class GridBasedPlacer:
             ax.add_patch(io_rect)
             cx = io.boundary.center().x
             cy = io.boundary.center().y
-            #ax.text(cx, cy, name, ha='center', va='center', fontsize=8, color='darkgreen')
 
         if self.die_boundary:
             ax.set_xlim(self.die_boundary.llx, self.die_boundary.urx)
@@ -1150,20 +1180,17 @@ class GridBasedPlacer:
                 self.placement_artists.append(artist)
                 artist_text = self.ax_placement.annotate(f'C{idx} Target', (target_point.x, target_point.y), fontsize=7, color=color,
                                      xytext=(5, 5), textcoords='offset points', bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', boxstyle='round,pad=0.1'), zorder=10)
-                #self.placement_artists.append(artist_text)
             elif constraint.type == 'pipe':
                 if constraint.vis_start_point:
                     artist = self.ax_placement.plot(constraint.vis_start_point.x, constraint.vis_start_point.y, '^', color=color, markersize=8, mew=1, zorder=10)[0]
                     self.placement_artists.append(artist)
                     artist_text = self.ax_placement.annotate(f'C{idx} Start', (constraint.vis_start_point.x, constraint.vis_start_point.y), fontsize=7, color=color,
                                          xytext=(5, 5), textcoords='offset points', bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', boxstyle='round,pad=0.1'), zorder=10)
-                    #self.placement_artists.append(artist_text)
                 if constraint.vis_end_point:
                     artist = self.ax_placement.plot(constraint.vis_end_point.x, constraint.vis_end_point.y, 's', color=color, markersize=8, mew=1, zorder=10)[0]
                     self.placement_artists.append(artist)
                     artist_text = self.ax_placement.annotate(f'C{idx} End', (constraint.vis_end_point.x, constraint.vis_end_point.y), fontsize=7, color=color,
                                          xytext=(5, 5), textcoords='offset points', bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', boxstyle='round,pad=0.1'), zorder=10)
-                    #self.placement_artists.append(artist_text)
 
                 # 繪製 pipe 路徑 (如果存在) - 使用實際保存的路徑
                 if constraint.vis_pipe_path:
@@ -1195,7 +1222,6 @@ class GridBasedPlacer:
                 cy = region.center().y
                 artist_text = self.ax_placement.text(cx, cy, name, ha='center', va='center',
                         fontsize=9, color='black', weight='bold', bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', boxstyle='round,pad=0.2'), zorder=6)
-                #self.placement_artists.append(artist_text)
 
             elif data['type'] == 'instance':
                 pos = data['position']
@@ -1203,15 +1229,13 @@ class GridBasedPlacer:
                 self.placement_artists.append(artist)
                 artist_text = self.ax_placement.annotate(name, (pos.x, pos.y), fontsize=7, color='black',
                            xytext=(5, 5), textcoords='offset points', bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', boxstyle='round,pad=0.1'), zorder=8)
-                #self.placement_artists.append(artist_text)
 
         self.fig.canvas.draw_idle()
         self.fig.canvas.flush_events() # 刷新事件，確保圖形更新
 
     def run(self, tvc_json: str, constraints: str,
             output_tcl: str = 'dft_regs_pre_place.tcl',
-            failed_list: str = 'failed_preplace.list',
-            debug_plot_interval: float = 0.5): # 新增參數控制更新間隔
+            failed_list: str = 'failed_preplace.list'):
         """執行完整流程"""
         print("=" * 60)
         print("Grid-Based Pre-placement Tool with Blockage Support")
@@ -1228,6 +1252,12 @@ class GridBasedPlacer:
 
         self.load_constraints(constraints)
         print(f"    ✓ Loaded {len(self.constraints)} constraints")
+
+        # Count constraint types
+        close_count = sum(1 for c in self.constraints if c.type == 'close_to_target')
+        pipe_count = sum(1 for c in self.constraints if c.type == 'pipe')
+        print(f"    ✓ Constraint types: {close_count} close_to_target, {pipe_count} pipe")
+        print(f"    ✓ Processing order: close_to_target first, then pipe")
 
         # 視覺化原始設計佈局 (步驟 1)
         print("\n[VISUALIZATION] Step 1: Showing initial design layout...")
@@ -1257,7 +1287,7 @@ class GridBasedPlacer:
         print("    (Step 3: Dynamic constraint processing visualization)")
         # 在處理約束前，先設置好動態視覺化圖形
         self._setup_placement_visualization()
-        self.process_constraints(debug_plot_interval) # 傳入間隔時間
+        self.process_constraints()
 
         # 處理完所有約束後，讓圖形保持顯示
         print("\n[VISUALIZATION] Final placement results")
@@ -1284,7 +1314,9 @@ class GridBasedPlacer:
         print("\n[5] Summary:")
         successful_placements = len(self.placements)
         total_elements = sum(len(c.elements) for c in self.constraints)
+        total_instances_placed = len(self.instance_locations)
         print(f"    ✓ Successfully placed: {successful_placements} items")
+        print(f"    ✓ Total individual instances placed: {total_instances_placed}")
         print(f"    ✓ Failed constraints: {len(self.failed_constraints)}")
 
         print("\n" + "=" * 60)
@@ -1359,6 +1391,27 @@ def create_test_files_with_blockages():
                         "Orientation": "R90",
                         "CellName": "VDD_CORNER",
                         "Legend_key": "VDD_CORNER"
+                    },
+                    {
+                        "Name": "PAD_OUT",
+                        "Location": [2970, 500],
+                        "Orientation": "R0",
+                        "CellName": "PAD_CELL",
+                        "Legend_key": "PAD_CELL"
+                    },
+                    {
+                        "Name": "PAD_TOP",
+                        "Location": [1000, 1970],
+                        "Orientation": "R0",
+                        "CellName": "PAD_CELL",
+                        "Legend_key": "PAD_CELL"
+                    },
+                    {
+                        "Name": "PAD_BOT",
+                        "Location": [1000, 0],
+                        "Orientation": "R0",
+                        "CellName": "PAD_CELL",
+                        "Legend_key": "PAD_CELL"
                     }
                 ]
             }
@@ -1369,6 +1422,7 @@ def create_test_files_with_blockages():
             "PVDD08CODCDGM_H": {"SIZE_X": 30.0, "SIZE_Y": 52.91},
             "PVDD1204CODCDGM_H": {"SIZE_X": 30.0, "SIZE_Y": 52.91},
             "VDD_CORNER": {"SIZE_X": 30.0, "SIZE_Y": 30.0}, # 假設角落 I/O Pad 尺寸
+            "PAD_CELL": {"SIZE_X": 30.0, "SIZE_Y": 30.0},
             # 也可以包含 Blocks 的 IP 尺寸
             "BLOCK1": {"SIZE_X": 500.0, "SIZE_Y": 500.0},
             "BLOCK2": {"SIZE_X": 500.0, "SIZE_Y": 500.0}
@@ -1378,80 +1432,81 @@ def create_test_files_with_blockages():
     with open('test_tvc_blockage.json', 'w') as f:
         json.dump(tvc_data, f, indent=2)
 
-    # I/O 檔案
-    with open('test_io.txt', 'w') as f:
-        f.write("PAD_IN {0 500 30 500 30 530 0 530}\n")
-        f.write("PAD_OUT {2970 500 3000 500 3000 530 2970 530}\n")
-        f.write("PAD_TOP {1000 1970 1030 1970 1030 2000 1000 2000}\n")
-        f.write("PAD_BOT {1000 0 1030 0 1030 30 1000 30}\n")
-
-    # 約束檔案 (pipe 類型不需要 Element Type 行)
+    # 約束檔案 - 測試 close_to_target 然後 pipe 的順序
     with open('test_constraints.phy', 'w') as f:
+        # First: close_to_target constraints
         f.write("Preplace Type: close to target\n")
-        f.write("Target Type: pin\n") # 使用 pin target
-        f.write("Target: u_block1\n") # 會靠近u_block1的pin box中心
+        f.write("Target Type: pin\n")
+        f.write("Target: u_block1\n")
         f.write("Element: u_test/inst1\n")
         f.write("Element Type: single\n")
         f.write("Area: 20.0\n\n")
 
         f.write("Preplace Type: close to target\n")
-        f.write("Target Type: cell\n") # 使用 cell target
-        f.write("Target: PAD_OUT\n") # 會靠近PAD_OUT的中心
+        f.write("Target Type: cell\n")
+        f.write("Target: PAD_OUT\n")
         f.write("Element: u_test/inst2\n")
         f.write("Element Type: single\n")
         f.write("Area: 20.0\n\n")
 
         f.write("Preplace Type: close to target\n")
-        f.write("Target Type: coords\n") # 使用 coords target
-        f.write("Target: [150.0, 150.0]\n") # 靠近 Core Area 左下角 (會被 Core Edge 擋住，會往外找)
+        f.write("Target Type: coords\n")
+        f.write("Target: [150.0, 150.0]\n")
         f.write("Element: u_test/inst3\n")
         f.write("Element Type: single\n")
         f.write("Area: 20.0\n\n")
 
         f.write("Preplace Type: close to target\n")
         f.write("Target Type: coords\n")
-        f.write("Target: [1500.0, 1000.0]\n") # 靠近中間的 blockage，會避開
+        f.write("Target: [1500.0, 1000.0]\n")
         f.write("Element: u_test/inst4\n")
         f.write("Element Type: single\n")
         f.write("Area: 20.0\n\n")
 
         f.write("Preplace Type: close to target\n")
         f.write("Target Type: cell\n")
-        f.write("Target: u_block2\n") # 靠近u_block2，但會避開u_block2
+        f.write("Target: u_block2\n")
         f.write("Element: u_test/inst5\n")
         f.write("Element Type: single\n")
         f.write("Area: 20.0\n\n")
 
         f.write("Preplace Type: close to target\n")
         f.write("Target Type: coords\n")
-        f.write("Target: [1300.0, 1300.0]\n") # 中間偏左，分配群組
+        f.write("Target: [1300.0, 1300.0]\n")
         f.write("Element: GROUP_A/reg_0 GROUP_A/reg_1 GROUP_A/reg_2\n")
         f.write("Element Type: instancesgroup\n")
-        f.write("Area: 50000.0\n\n") # 大一些的群組
+        f.write("Area: 50000.0\n\n")
 
-        f.write("Preplace Type: pipe\n")  # pipe 類型
-        f.write("Start: PAD_BOT\n")
-        f.write("End: PAD_TOP\n")
+        # Then: pipe constraints that can reference previously placed instances
+        f.write("Preplace Type: pipe\n")
+        f.write("Start: PAD_BOT\n")  # Start from I/O pad
+        f.write("End: PAD_TOP\n")    # End at another I/O pad
         f.write("Stage1: u_dft/s_0 u_dft/s_1 u_dft/s_2\n")
         f.write("Stage2: u_dft/s_3 u_dft/s_4 u_dft/s_5\n")
-        # 不需要 Element Type 行，因為 pipe 固定為 single
         f.write("Area: 20.0\n\n")
 
-        f.write("Preplace Type: pipe\n")  # pipe 類型
-        f.write("Start: u_test/inst1\n") # 以已放置的元件為起點
-        f.write("End: u_test/inst5\n")   # 以已放置的元件為終點
-        f.write("Stage1: u_dft_sub/s_0 u_dft_sub/s_1 u_dft_sub/s_2\n") # 短一些的 DFT 鏈
-        # 不需要 Element Type 行
+        f.write("Preplace Type: pipe\n")
+        f.write("Start: u_test/inst1\n")  # Start from previously placed instance
+        f.write("End: u_test/inst5\n")    # End at previously placed instance
+        f.write("Stage1: u_dft_sub/s_0 u_dft_sub/s_1 u_dft_sub/s_2\n")
         f.write("Area: 20.0\n\n")
 
+        f.write("Preplace Type: pipe\n")
+        f.write("Start: GROUP_A/reg_0\n")  # Start from instance in group
+        f.write("End: u_test/inst2\n")     # End at single instance
+        f.write("Stage1: u_pipe/p_0 u_pipe/p_1\n")
+        f.write("Stage2: u_pipe/p_2 u_pipe/p_3\n")
+        f.write("Area: 20.0\n\n")
+
+        # Test failure case
         f.write("Preplace Type: close to target\n")
         f.write("Target Type: coords\n")
-        f.write("Target: [100.0, 100.0]\n") # 在 Core Area 之外, 無法放置
+        f.write("Target: [100.0, 100.0]\n")  # Outside Core Area
         f.write("Element: u_test/inst_fail\n")
         f.write("Element Type: single\n")
         f.write("Area: 20.0\n\n")
 
-    print("Test files created with blockages and updated pipe constraints!")
+    print("Test files created with blockages and ordered constraints (close_to_target first, then pipe)!")
 
 
 # 使用範例
@@ -1462,8 +1517,6 @@ if __name__ == "__main__":
     ROOT_MODULE_NAME = "SoIC_A16_eTV5_root"
 
     if len(sys.argv) == 3:
-        # 如果從命令行傳入參數，可以考慮讓用戶指定 root_module_name
-        # 這裡簡化為直接使用預設值
         placer = GridBasedPlacer(grid_size=50.0, root_module_name=ROOT_MODULE_NAME)
         placer.run(
             tvc_json=sys.argv[1],
@@ -1480,7 +1533,5 @@ if __name__ == "__main__":
         placer = GridBasedPlacer(grid_size=50.0, root_module_name=ROOT_MODULE_NAME)
         placer.run(
             tvc_json='test_tvc_blockage.json',
-            constraints='test_constraints.phy',
-            debug_plot_interval=0.5 # 設定每次更新的間隔時間 (秒)
+            constraints='test_constraints.phy'
         )
-
