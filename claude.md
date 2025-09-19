@@ -1,5 +1,11 @@
 # Grid-Based Pre-placement Tool with Blockage Support
-# Grid-Based Pre-placement Tool with Blockage Support
+### 設計理念
+
+這種改進的方法更符合實際 IC 設計需求：
+
+1. **保持連接完整性**：DFT scan chain 必須連接已經確定位置的元件（如 I/O pads、功能模塊），不應改變這些元件的位置
+2. **現實的繞線模型**：實際佈線可以穿過放置群組的上方（不同金屬層），因此路徑規劃允許穿過 RESERVED 區域
+3. **分離關注點**：路徑規劃（routing）與元件放置（placement）是兩個不同的步驟，不應混淆# Grid-Based Pre-placement Tool with Blockage Support
 
 ## 📋 概述
 
@@ -300,20 +306,41 @@ Constraint C1 for elements [...]: No free space found...
 
 ### A* 路徑尋找
 
-用於 pipe 約束，尋找避開障礙物的最短路徑：
+用於 pipe 約束，尋找避開硬障礙物的最優路徑：
 
 1. 使用曼哈頓距離作為啟發函數
-2. 只能在 `GRID_FREE` 的網格上移動
-3. 返回最優路徑或 None（無解）
+2. **可以通過 `GRID_FREE` 和 `GRID_RESERVED` 網格**（允許穿過已放置的群組）
+3. 只避開 `GRID_BLOCKED`（硬區塊、blockage、核心區域外）
+4. 返回最優路徑或 None（無解）
 
-### Pipe Stage 放置
+### Pipe Stage 放置策略
 
 對於 pipe 約束的特殊處理：
 
-1. 計算路徑上的放置點數量（基於 stage 數量）
-2. 將路徑等分，每個 stage 群組分配一個點
-3. 每個 stage 群組使用單一網格單元
-4. 所有 stage 內的實例記錄在同一位置
+1. **直接使用起終點位置**：
+   - 從已放置的 start/end 元件獲取確切位置
+   - 直接轉換為網格座標，不搜尋替代點
+
+2. **路徑規劃**：
+   - 使用 A* 找出從起點到終點的路徑
+   - 路徑可以穿過 `GRID_RESERVED` 區域（已放置的群組）
+
+3. **Stage 分配**：
+   - 將路徑等分為 n+1 段（n 個 stage）
+   - 每個分段點作為對應 stage 的目標位置
+
+4. **放置驗證**：
+   - 檢查每個分段點是否為 `GRID_FREE`
+   - 如果不是，使用 BFS 搜尋最近的可用網格
+   - 每個 stage 群組使用單一網格單元
+
+### 設計理念
+
+這種改進的方法更符合實際 IC 設計需求：
+
+1. **保持連接完整性**：DFT scan chain 必須連接已經確定位置的元件（如 I/O pads、功能模塊），不應改變這些元件的位置
+2. **現實的繞線模型**：實際佈線可以穿過放置群組的上方（不同金屬層），因此路徑規劃允許穿過 RESERVED 區域
+3. **分離關注點**：路徑規劃（routing）與元件放置（placement）是兩個不同的步驟，不應混淆
 
 ### 最近可用網格搜尋
 
@@ -375,6 +402,7 @@ placer.run(
 - **網格大小**：較小的網格提供更精確的放置，但增加計算時間
 - **約束數量**：大量約束可能導致處理時間增長
 - **Pipe Stage 數量**：更多的 stage 需要更長的路徑和更多的網格
+- **路徑規劃效能**：改進的 A* 演算法允許穿過 RESERVED 區域，通常能找到更短的路徑，提高效率
 - **視覺化**：可以調整 `debug_plot_interval` 或關閉視覺化以提高處理速度
 
 ## 🐛 除錯建議
@@ -385,10 +413,15 @@ placer.run(
 4. **觀察三步驟視覺化**：
    - Step 1: 確認設計載入正確，包括 I/O pads 和 MP sensors
    - Step 2: 確認網格地圖正確標記障礙物
-   - Step 3: 即時觀察約束處理過程，注意 Pipe Stage 群組的紫色標記
+   - Step 3: 即時觀察約束處理過程，注意：
+     - Pipe 路徑（虛線）可能穿過群組區域（RESERVED）
+     - Stage 實際放置位置可能偏離路徑（尋找最近 FREE 網格）
 5. **檢視失敗列表**：了解哪些約束無法滿足及原因
 6. **調整網格大小**：如果放置失敗過多，嘗試減小網格大小
-7. **檢查 Pipe 約束**：確認起點和終點元件已經被放置或存在於設計中
+7. **檢查 Pipe 約束**：
+   - 確認起點和終點元件已經被放置或存在於設計中
+   - 觀察路徑是否被硬區塊完全阻斷
+   - 檢查 stage 放置點附近是否有足夠的 FREE 網格
 8. **使用測試模式**：先用內建測試案例驗證工具功能
 
 ## 📝 注意事項
@@ -396,15 +429,25 @@ placer.run(
 1. **根模組名稱**：預設為 `"uDue1/u_socss_0"`，必須與 TVC JSON 中的鍵名匹配
 2. **座標系統**：所有座標單位為微米（μm）
 3. **約束順序**：先處理所有 close_to_target，再處理 pipe 約束
-4. **Pipe Stage 群組**：每個 stage 使用單一網格單元，適合小型群組
-5. **Core Area**：只能在核心區域內放置元件
-6. **Blockages**：會被標記為 GRID_BLOCKED，無法放置元件
-7. **I/O Pads 和 MP Sensors**：從 TVC JSON 自動載入，作為可參考的目標但不可覆蓋
-8. **視覺化視窗**：每個步驟結束後需手動關閉視窗才能繼續
+4. **Pipe 路徑規劃**：
+   - 起終點使用實際放置位置，不會偏移
+   - 路徑可以穿過已放置的群組（RESERVED 區域）
+   - 每個 stage 放置時才檢查是否有可用網格
+5. **Pipe Stage 群組**：每個 stage 使用單一網格單元，適合小型群組
+6. **Core Area**：只能在核心區域內放置元件
+7. **Blockages**：會被標記為 GRID_BLOCKED，無法放置元件和路徑通過
+8. **I/O Pads 和 MP Sensors**：從 TVC JSON 自動載入，作為可參考的目標但不可覆蓋
+9. **視覺化視窗**：每個步驟結束後需手動關閉視窗才能繼續
 
 ## 🔄 更新歷史
 
-### 最新更新 (Pipe Stage Groups)
+### 最新更新 (Improved Pipe Path Finding)
+- **改進路徑規劃**：A* 演算法現可通過 RESERVED 區域，只避開 BLOCKED
+- **保持起終點精確性**：直接使用 start/end 的實際位置，不再搜尋替代點
+- **智能 Stage 放置**：先規劃完整路徑，再為每個 stage 尋找可用位置
+- **更真實的路徑**：pipe 路徑可穿過已放置的群組，更符合實際 DFT 設計需求
+
+### 先前更新 (Pipe Stage Groups)
 - **Pipe 約束改進**：移除 `Element Type: single`，預設為 `instancesgroup`
 - **Stage 群組化**：每個 pipe stage 現在作為獨立群組處理
 - **簡化語法**：pipe 約束不再需要指定 Element Type 或 Area

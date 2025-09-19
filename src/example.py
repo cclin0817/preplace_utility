@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Grid-Based Pre-placement Tool with Blockage Support
 使用網格結構和 A* 演算法的預放置工具
@@ -457,7 +458,8 @@ class GridBasedPlacer:
     def a_star_path(self, start: Tuple[int, int],
                     end: Tuple[int, int]) -> Optional[List[Tuple[int, int]]]:
         """
-        使用 A* 演算法尋找路徑，避開 GRID_BLOCKED 和 GRID_RESERVED。
+        使用 A* 演算法尋找路徑，只避開 GRID_BLOCKED。
+        允許通過 GRID_FREE 和 GRID_RESERVED 區域。
         Returns:
             網格座標列表，如果找不到路徑則返回 None。
         """
@@ -485,10 +487,10 @@ class GridBasedPlacer:
                 neighbor = (current[0] + dx, current[1] + dy)
                 nx, ny = neighbor
 
-                # 檢查邊界和障礙 (GRID_BLOCKED)
+                # 檢查邊界和障礙 - 現在可以通過 FREE 和 RESERVED
                 if (0 <= nx < self.grid_width and
                     0 <= ny < self.grid_height and
-                    self.grid_map[ny, nx] == self.GRID_FREE and # 只能走 GRID_FREE
+                    self.grid_map[ny, nx] != self.GRID_BLOCKED and # 可以走 FREE 或 RESERVED
                     neighbor not in visited_nodes):
 
                     tentative_g_score = g_score + 1
@@ -811,15 +813,19 @@ class GridBasedPlacer:
                     constraint.vis_start_point = start_pos
                     constraint.vis_end_point = end_pos
 
-                    start_grid = self.find_nearest_free_grid(start_pos)
-                    end_grid = self.find_nearest_free_grid(end_pos)
+                    # Directly convert start/end positions to grid coordinates
+                    start_grid = start_pos.to_grid(self.grid_size)
+                    end_grid = end_pos.to_grid(self.grid_size)
 
-                    if not start_grid or not end_grid:
-                        self.failed_constraints.append(
-                            f"Constraint C{idx} (pipe for {constraint.elements}): Could not find free start or end grid."
-                        )
-                        self._update_placement_visualization(idx)
-                        continue
+                    # Ensure grid coordinates are within bounds
+                    start_grid = (
+                        max(0, min(start_grid[0], self.grid_width - 1)),
+                        max(0, min(start_grid[1], self.grid_height - 1))
+                    )
+                    end_grid = (
+                        max(0, min(end_grid[0], self.grid_width - 1)),
+                        max(0, min(end_grid[1], self.grid_height - 1))
+                    )
 
                     path = self.a_star_path(start_grid, end_grid)
 
@@ -827,7 +833,7 @@ class GridBasedPlacer:
                         # Save the actual path for visualization
                         constraint.vis_pipe_path = path
 
-                        # NEW: Process pipe stages as groups
+                        # Process pipe stages as groups
                         num_stages = len(constraint.stages) if constraint.stages else 0
                         if num_stages == 0:
                             self._update_placement_visualization(idx)
@@ -840,6 +846,25 @@ class GridBasedPlacer:
                             # Determine position for this stage group
                             idx_on_path = min((stage_idx + 1) * path_step, len(path) - 1)
                             grid_point = path[idx_on_path]
+
+                            # Check if this grid point is FREE
+                            if self.grid_map[grid_point[1], grid_point[0]] != self.GRID_FREE:
+                                # Find nearest free grid if the path point is not free
+                                stage_point = Point(
+                                    (grid_point[0] + 0.5) * self.grid_size,
+                                    (grid_point[1] + 0.5) * self.grid_size
+                                )
+                                nearest_free = self.find_nearest_free_grid(stage_point)
+
+                                if nearest_free:
+                                    grid_point = nearest_free
+                                    print(f"  → Stage {stage_idx} moved to nearest free grid at ({grid_point[0]}, {grid_point[1]})")
+                                else:
+                                    self.failed_constraints.append(
+                                        f"Constraint C{idx} (pipe stage {stage_idx} for {stage_instances}): "
+                                        f"Cannot find free grid near path position."
+                                    )
+                                    continue
 
                             stage_point = Point(
                                 (grid_point[0] + 0.5) * self.grid_size,
@@ -875,7 +900,8 @@ class GridBasedPlacer:
                     else:
                         self.failed_constraints.append(
                             f"Constraint C{idx} (pipe for {constraint.elements}): "
-                            f"Cannot find a path from {start_grid} to {end_grid} (no free path)."
+                            f"Cannot find a path from ({start_grid[0]}, {start_grid[1]}) to ({end_grid[0]}, {end_grid[1]}) "
+                            f"(path blocked by hard blocks/blockages)."
                         )
 
             except Exception as e:
@@ -1598,5 +1624,3 @@ if __name__ == "__main__":
             tvc_json='test_tvc_blockage.json',
             constraints='test_constraints.phy'
         )
-
-
