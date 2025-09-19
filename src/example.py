@@ -3,6 +3,7 @@
 Grid-Based Pre-placement Tool with Blockage Support
 使用網格結構和 A* 演算法的預放置工具
 Modified to process close_to_target first, then pipe
+Pipe stages are now treated as instance groups
 """
 
 import json
@@ -94,6 +95,7 @@ class Constraint:
     # pipe 相關
     start: Optional[str] = None   # pipe 起點元件
     end: Optional[str] = None     # pipe 終點元件
+    stages: Optional[List[List[str]]] = None  # NEW: List of stages, each stage is a list of instances
 
     element_type: str = 'single'  # 'single', 'instancesgroup', 'module'
     area: float = 20.0            # 僅用於 instancesgroup/module
@@ -113,7 +115,8 @@ class Constraint:
                 target_info = f"{self.target_type}='{self.target_name}'"
             return f"Constraint(Type='{self.type}', Target={target_info})"
         elif self.type == 'pipe':
-            return f"Constraint(Type='{self.type}', Start='{self.start}', End='{self.end}')"
+            num_stages = len(self.stages) if self.stages else 0
+            return f"Constraint(Type='{self.type}', Start='{self.start}', End='{self.end}', Stages={num_stages})"
         else:
             return super().__str__() # 對於未知類型，使用預設的 dataclass 字串表示
 
@@ -308,7 +311,8 @@ class GridBasedPlacer:
                     constraint.type = 'close_to_target'
                 elif 'pipe' in line:
                     constraint.type = 'pipe'
-                    constraint.element_type = 'single'  # pipe 類型固定為 single
+                    constraint.element_type = 'instancesgroup'  # CHANGED: Default for pipe is now instancesgroup
+                    constraint.stages = []  # NEW: Initialize stages list
 
                 i += 1
                 while i < len(lines):
@@ -341,20 +345,25 @@ class GridBasedPlacer:
                         elif line.startswith('Element:'):
                             constraint.elements = line.split(':')[1].strip().split()
 
-                    # pipe 相關解析
+                    # pipe 相關解析 - MODIFIED
                     elif constraint.type == 'pipe':
                         if line.startswith('Start:'):
                             constraint.start = line.split(':')[1].strip()
                         elif line.startswith('End:'):
                             constraint.end = line.split(':')[1].strip()
                         elif line.startswith('Stage'): # Stage1, Stage2, ...
-                            elements = line.split(':')[1].strip().split()
-                            constraint.elements.extend(elements) # 累積所有 Stage 的元件
-                        # 跳過 Element Type 和 Area 行
+                            stage_elements = line.split(':')[1].strip().split()
+                            if stage_elements:  # Only add non-empty stages
+                                constraint.stages.append(stage_elements)  # NEW: Add as a stage
+                                constraint.elements.extend(stage_elements) # Keep for compatibility
+                        # No longer process Element Type or Area for pipe
 
                     i += 1
 
-                if constraint.elements: # 只有當有元件時才加入約束列表
+                # Only add constraint if it has elements (or stages for pipe)
+                if constraint.type == 'pipe' and constraint.stages:
+                    self.constraints.append(constraint)
+                elif constraint.type == 'close_to_target' and constraint.elements:
                     self.constraints.append(constraint)
 
             i += 1
@@ -606,6 +615,38 @@ class GridBasedPlacer:
 
         return best_region_rect
 
+    def allocate_single_grid_region(self, near_point: Point) -> Optional[Rectangle]:
+        """Allocate a single grid cell region near the given point"""
+        grid_x, grid_y = near_point.to_grid(self.grid_size)
+
+        # Adjust to valid range
+        grid_x = max(0, min(grid_x, self.grid_width - 1))
+        grid_y = max(0, min(grid_y, self.grid_height - 1))
+
+        # If target grid is free, use it
+        if self.grid_map[grid_y, grid_x] == self.GRID_FREE:
+            self.grid_map[grid_y, grid_x] = self.GRID_RESERVED
+            return Rectangle(
+                grid_x * self.grid_size,
+                grid_y * self.grid_size,
+                (grid_x + 1) * self.grid_size,
+                (grid_y + 1) * self.grid_size
+            )
+
+        # Otherwise, find nearest free grid
+        nearest = self.find_nearest_free_grid(near_point)
+        if nearest:
+            gx, gy = nearest
+            self.grid_map[gy, gx] = self.GRID_RESERVED
+            return Rectangle(
+                gx * self.grid_size,
+                gy * self.grid_size,
+                (gx + 1) * self.grid_size,
+                (gy + 1) * self.grid_size
+            )
+
+        return None
+
     def get_instance_position(self, inst_name: str) -> Optional[Point]:
         """
         Get the position of an instance.
@@ -786,38 +827,51 @@ class GridBasedPlacer:
                         # Save the actual path for visualization
                         constraint.vis_pipe_path = path
 
-                        num_elements = len(constraint.elements)
-                        if num_elements == 0:
+                        # NEW: Process pipe stages as groups
+                        num_stages = len(constraint.stages) if constraint.stages else 0
+                        if num_stages == 0:
                             self._update_placement_visualization(idx)
                             continue
 
-                        # Distribute instances along the path
-                        positions = []
-                        path_step = max(1, len(path) // (num_elements + 1))
+                        # Distribute stage groups along the path
+                        path_step = max(1, len(path) // (num_stages + 1))
 
-                        for i in range(num_elements):
-                            idx_on_path = min((i + 1) * path_step, len(path) - 1)
+                        for stage_idx, stage_instances in enumerate(constraint.stages):
+                            # Determine position for this stage group
+                            idx_on_path = min((stage_idx + 1) * path_step, len(path) - 1)
                             grid_point = path[idx_on_path]
 
-                            # Mark grid as BLOCKED
-                            if self.grid_map[grid_point[1], grid_point[0]] == self.GRID_FREE:
-                                self.grid_map[grid_point[1], grid_point[0]] = self.GRID_BLOCKED
-
-                            positions.append(Point(
+                            stage_point = Point(
                                 (grid_point[0] + 0.5) * self.grid_size,
                                 (grid_point[1] + 0.5) * self.grid_size
-                            ))
+                            )
 
-                        # Place each instance and record its location
-                        for element, pos in zip(constraint.elements, positions):
-                            self.placements[element] = {
-                                'type': 'instance',
-                                'position': pos,
-                                'constraint_idx': idx
-                            }
-                            # NEW: Record instance location
-                            self.instance_locations[element] = pos
-                            print(f"  → Placed {element} at {pos} (pipe)")
+                            # Create a group for this stage
+                            group_name = f"TVC_PIPE_STAGE_{group_id}"
+                            group_id += 1
+
+                            # Allocate a single grid cell for the stage group
+                            region = self.allocate_single_grid_region(stage_point)
+
+                            if region:
+                                self.placements[group_name] = {
+                                    'type': 'group',
+                                    'region': region,
+                                    'instances': stage_instances,
+                                    'constraint_idx': idx,
+                                    'is_pipe_stage': True  # Mark as pipe stage for special handling
+                                }
+
+                                # Record location for each instance in the stage
+                                center_point = region.center()
+                                for inst in stage_instances:
+                                    self.instance_locations[inst] = center_point
+                                    print(f"  → Placed {inst} in pipe stage {group_name} at {center_point}")
+                            else:
+                                self.failed_constraints.append(
+                                    f"Constraint C{idx} (pipe stage {stage_idx} for {stage_instances}): "
+                                    f"Cannot allocate grid at position."
+                                )
                     else:
                         self.failed_constraints.append(
                             f"Constraint C{idx} (pipe for {constraint.elements}): "
@@ -845,18 +899,14 @@ class GridBasedPlacer:
     def generate_tcl_script(self, filepath: str):
         """
         Generate Innovus TCL script.
-        For groups from close_to_target, output group commands.
-        For pipe constraints, only output individual placeInstance commands.
+        Groups are created for both close_to_target and pipe constraints.
         """
         with open(filepath, 'w') as f:
             f.write("# Pre-placement TCL Script\n")
             f.write("# Generated by Grid-Based Placer\n")
             f.write(f"# Grid Size: {self.grid_size} um\n")
 
-            # Track which instances are in groups
-            instances_in_groups = set()
-
-            # Process groups first (only from close_to_target constraints)
+            # Process all groups (from both close_to_target and pipe)
             for name, data in self.placements.items():
                 if data['type'] == 'group':
                     region = data['region']
@@ -867,12 +917,10 @@ class GridBasedPlacer:
                     # Add instances to group
                     instances = " ".join(data['instances'])
                     f.write(f"addInstToInstGroup {name} {{ {instances} }}\n\n")
-                    # Mark these instances as being in a group
-                    instances_in_groups.update(data['instances'])
 
-            # Process single instances (including those from pipe constraints)
+            # Process single instances (should only be from close_to_target now)
             for name, data in self.placements.items():
-                if data['type'] == 'instance' and name not in instances_in_groups:
+                if data['type'] == 'instance':
                     pos = data['position']
                     f.write(f"placeInstance {name} "
                            f"{pos.x:.2f} {pos.y:.2f} -softFixed\n")
@@ -1144,6 +1192,7 @@ class GridBasedPlacer:
             patches.Patch(color='lightgreen', alpha=0.6, label='I/O Pads'),
             patches.Patch(color='lightgray', alpha=0.3, label='Core Area'),
             patches.Patch(color='gray', alpha=0.3, label='Instance Groups'),
+            patches.Patch(color='purple', alpha=0.3, label='Pipe Stage Groups'),  # NEW
             plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='gray', markersize=8, label='Single Instances', markeredgecolor='black'),
             plt.Line2D([0], [0], marker='x', color='gray', markersize=10, mew=2, linestyle='None', label='Target Point'),
             plt.Line2D([0], [0], marker='^', color='gray', markersize=8, mew=1, linestyle='None', label='Pipe Start'),  # 改為三角形
@@ -1205,13 +1254,29 @@ class GridBasedPlacer:
 
             if data['type'] == 'group':
                 region = data['region']
-                group_rect = patches.Rectangle(
-                    (region.llx, region.lly),
-                    region.urx - region.llx,
-                    region.ury - region.lly,
-                    linewidth=2, edgecolor=color,
-                    facecolor=color, alpha=0.3, zorder=5
-                )
+                # Different style for pipe stage groups
+                is_pipe_stage = data.get('is_pipe_stage', False)
+
+                if is_pipe_stage:
+                    # Pipe stage groups - smaller, different color scheme
+                    group_rect = patches.Rectangle(
+                        (region.llx, region.lly),
+                        region.urx - region.llx,
+                        region.ury - region.lly,
+                        linewidth=2, edgecolor=color,
+                        facecolor='purple', alpha=0.4, zorder=5,
+                        linestyle=':'  # Dotted line for pipe stages
+                    )
+                else:
+                    # Regular groups
+                    group_rect = patches.Rectangle(
+                        (region.llx, region.lly),
+                        region.urx - region.llx,
+                        region.ury - region.lly,
+                        linewidth=2, edgecolor=color,
+                        facecolor=color, alpha=0.3, zorder=5
+                    )
+
                 self.ax_placement.add_patch(group_rect)
                 self.placement_artists.append(group_rect)
 
@@ -1255,6 +1320,7 @@ class GridBasedPlacer:
         pipe_count = sum(1 for c in self.constraints if c.type == 'pipe')
         print(f"    ✓ Constraint types: {close_count} close_to_target, {pipe_count} pipe")
         print(f"    ✓ Processing order: close_to_target first, then pipe")
+        print(f"    ✓ Pipe constraints will create stage groups (one grid per stage)")
 
         # 視覺化原始設計佈局 (步驟 1)
         print("\n[VISUALIZATION] Step 1: Showing initial design layout...")
@@ -1312,7 +1378,7 @@ class GridBasedPlacer:
         successful_placements = len(self.placements)
         total_elements = sum(len(c.elements) for c in self.constraints)
         total_instances_placed = len(self.instance_locations)
-        print(f"    ✓ Successfully placed: {successful_placements} items")
+        print(f"    ✓ Successfully placed: {successful_placements} items (groups and instances)")
         print(f"    ✓ Total individual instances placed: {total_instances_placed}")
         print(f"    ✓ Failed constraints: {len(self.failed_constraints)}")
 
@@ -1323,7 +1389,7 @@ class GridBasedPlacer:
 
 # 測試用的範例 JSON 檔案
 def create_test_files_with_blockages():
-    """建立包含 blockages 的測試檔案"""
+    """建立包含 blockages 的測試檔案 - Updated for pipe stage groups"""
     import json
 
     # TVC JSON with blockages
@@ -1430,6 +1496,7 @@ def create_test_files_with_blockages():
         json.dump(tvc_data, f, indent=2)
 
     # 約束檔案 - 測試 close_to_target 然後 pipe 的順序
+    # MODIFIED: Remove "Element Type: single" from pipe constraints
     with open('test_constraints.phy', 'w') as f:
         # First: close_to_target constraints with module type
         f.write("Preplace Type: close to target\n")
@@ -1475,23 +1542,23 @@ def create_test_files_with_blockages():
         f.write("Element Type: module\n")  # module type should behave like instancesgroup
         f.write("Area: 50000.0\n\n")
 
-        # Then: pipe constraints without Area parameter
+        # Then: pipe constraints - NO "Element Type: single" line
         f.write("Preplace Type: pipe\n")
         f.write("Start: PAD_BOT\n")  # Start from I/O pad
         f.write("End: PAD_TOP\n")    # End at another I/O pad
         f.write("Stage1: u_dft/s_0 u_dft/s_1 u_dft/s_2\n")
-        f.write("Stage2: u_dft/s_3 u_dft/s_4 u_dft/s_5\n\n")  # No Area line
+        f.write("Stage2: u_dft/s_3 u_dft/s_4 u_dft/s_5\n\n")  # No Element Type line
 
         f.write("Preplace Type: pipe\n")
         f.write("Start: u_test/inst1\n")  # Start from previously placed instance
         f.write("End: u_test/inst5\n")    # End at previously placed instance
-        f.write("Stage1: u_dft_sub/s_0 u_dft_sub/s_1 u_dft_sub/s_2\n\n")  # No Area line
+        f.write("Stage1: u_dft_sub/s_0 u_dft_sub/s_1 u_dft_sub/s_2\n\n")  # No Element Type line
 
         f.write("Preplace Type: pipe\n")
         f.write("Start: GROUP_A/reg_0\n")  # Start from instance in group
         f.write("End: u_test/inst2\n")     # End at single instance
         f.write("Stage1: u_pipe/p_0 u_pipe/p_1\n")
-        f.write("Stage2: u_pipe/p_2 u_pipe/p_3\n\n")  # No Area line
+        f.write("Stage2: u_pipe/p_2 u_pipe/p_3\n\n")  # No Element Type line
 
         # Test failure case
         f.write("Preplace Type: close to target\n")
@@ -1501,7 +1568,8 @@ def create_test_files_with_blockages():
         f.write("Element Type: single\n")
         f.write("Area: 20.0\n\n")
 
-    print("Test files created with module support and pipe without Area parameter!")
+    print("Test files created with pipe stage groups support!")
+    print("Pipe constraints now create groups for each stage (one grid per stage).")
 
 
 # 使用範例
