@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-#!/usr/bin/env python3
 """
 Grid-Based Pre-placement Tool with Blockage Support
 使用網格結構和 A* 演算法的預放置工具
@@ -83,6 +82,12 @@ class IOPad:
     boundary: Rectangle
 
 @dataclass
+class MPSensor:
+    """MP Sensor 資料結構"""
+    name: str
+    boundary: Rectangle
+
+@dataclass
 class Constraint:
     """放置約束"""
     type: str  # 'close_to_target', 'pipe'
@@ -141,6 +146,7 @@ class GridBasedPlacer:
         self.blocks: Dict[str, Block] = {}
         self.blockages: Dict[str, Blockage] = {} # 僅用於載入和視覺化，網格中會轉為 GRID_BLOCKED
         self.io_pads: Dict[str, IOPad] = {}
+        self.mp_sensors: Dict[str, MPSensor] = {}  # FIX 4: 獨立儲存 MP sensors
         self.ip_dimensions: Dict[str, Tuple[float, float]] = {}
 
         # 網格地圖
@@ -167,6 +173,10 @@ class GridBasedPlacer:
         self.placement_artists = [] # 儲存放置結果的 matplotlib 物件，以便清除
         self.current_constraint_text = None # 顯示當前處理的約束
         self.cmap_constraints = None # 約束顏色映射
+
+    def is_valid_grid_coord(self, x: int, y: int) -> bool:
+        """統一的網格座標有效性檢查"""
+        return 0 <= x < self.grid_width and 0 <= y < self.grid_height
 
     def load_tvc_json(self, filepath: str):
         """載入 TVC JSON 檔案"""
@@ -236,11 +246,10 @@ class GridBasedPlacer:
                         llx, lly = location[0], location[1]
                         urx, ury = llx + size_x, lly + size_y
 
-                        sensor_block = Block(
+                        self.mp_sensors[name] = MPSensor(
                             name=name,
                             boundary=Rectangle(llx, lly, urx, ury)
                         )
-                        self.blocks[name] = sensor_block
                     else:
                         print(f"警告: MP_SENSOR '{name}' 的 CellName '{cell_name}' 在 IP 尺寸中未找到，跳過。")
             else:
@@ -418,6 +427,19 @@ class GridBasedPlacer:
                 for gx in range(x1, x2):
                     self.grid_map[gy, gx] = self.GRID_BLOCKED
 
+        for sensor in self.mp_sensors.values():
+            grid_region = sensor.boundary.to_grid_region(self.grid_size)
+            x1, y1, x2, y2 = grid_region
+
+            x1 = max(0, x1)
+            y1 = max(0, y1)
+            x2 = min(self.grid_width, x2)
+            y2 = min(self.grid_height, y2)
+
+            for gy in range(y1, y2):
+                for gx in range(x1, x2):
+                    self.grid_map[gy, gx] = self.GRID_BLOCKED
+
     def find_nearest_free_grid(self, target: Point) -> Optional[Tuple[int, int]]:
         """
         找到最近的可用網格 (GRID_FREE)。
@@ -450,7 +472,7 @@ class GridBasedPlacer:
             # 探索四個方向 (從中心向外擴展)
             for dx, dy in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
                 nx, ny = x + dx, y + dy
-                if (0 <= nx < self.grid_width and 0 <= ny < self.grid_height and (nx, ny) not in visited):
+                if self.is_valid_grid_coord(nx, ny) and (nx, ny) not in visited:
                     queue.append((nx, ny))
 
         return None # 找不到可用網格
@@ -487,9 +509,7 @@ class GridBasedPlacer:
                 neighbor = (current[0] + dx, current[1] + dy)
                 nx, ny = neighbor
 
-                # 檢查邊界和障礙 - 現在可以通過 FREE 和 RESERVED
-                if (0 <= nx < self.grid_width and
-                    0 <= ny < self.grid_height and
+                if (self.is_valid_grid_coord(nx, ny) and
                     self.grid_map[ny, nx] != self.GRID_BLOCKED and # 可以走 FREE 或 RESERVED
                     neighbor not in visited_nodes):
 
@@ -520,6 +540,7 @@ class GridBasedPlacer:
             print(f"警告: Pin '{constraint.target_name}' 無法解析出對應的 block。")
             print(f"      可用的 blocks: {list(self.blocks.keys())}")
             print(f"      可用的 I/O pads: {list(self.io_pads.keys())}")
+            print(f"      可用的 MP sensors: {list(self.mp_sensors.keys())}")
         elif constraint.target_type == 'cell':
             # 對於 cell 類型，直接查找
             if constraint.target_name in self.blocks:
@@ -527,7 +548,9 @@ class GridBasedPlacer:
                 # cell 類型通常使用 boundary 中心，除非特別需要 pin_box
                 return block.boundary.center()
             elif constraint.target_name in self.io_pads:
-                    return self.io_pads[constraint.target_name].boundary.center()
+                return self.io_pads[constraint.target_name].boundary.center()
+            elif constraint.target_name in self.mp_sensors:
+                return self.mp_sensors[constraint.target_name].boundary.center()
         return None
 
     def allocate_region(self, area: float, near_point: Point) -> Optional[Rectangle]:
@@ -568,7 +591,6 @@ class GridBasedPlacer:
                 ur_grid_x = ll_grid_x + current_side_grids
                 ur_grid_y = ll_grid_y + current_side_grids
 
-                # 檢查邊界
                 if not (0 <= ll_grid_x < ur_grid_x <= self.grid_width and
                         0 <= ll_grid_y < ur_grid_y <= self.grid_height):
                     continue
@@ -576,7 +598,7 @@ class GridBasedPlacer:
                 is_free = True
                 for y_grid in range(ll_grid_y, ur_grid_y):
                     for x_grid in range(ll_grid_x, ur_grid_x):
-                        if not (0 <= x_grid < self.grid_width and 0 <= y_grid < self.grid_height):
+                        if not self.is_valid_grid_coord(x_grid, y_grid):
                             is_free = False # 超出網格範圍
                             break
                         if self.grid_map[y_grid, x_grid] != self.GRID_FREE:
@@ -612,7 +634,7 @@ class GridBasedPlacer:
             # 標記區域為已保留
             for y_grid in range(lly_grid, ury_grid):
                 for x_grid in range(llx_grid, urx_grid):
-                    if 0 <= x_grid < self.grid_width and 0 <= y_grid < self.grid_height:
+                    if self.is_valid_grid_coord(x_grid, y_grid):
                         self.grid_map[y_grid, x_grid] = self.GRID_RESERVED
 
         return best_region_rect
@@ -653,7 +675,7 @@ class GridBasedPlacer:
         """
         Get the position of an instance.
         First check instance_locations (for individual instances and group members),
-        then check blocks and IO pads.
+        then check blocks, IO pads, and MP sensors.
         """
         # Check in instance_locations first (includes both single instances and group members)
         if inst_name in self.instance_locations:
@@ -666,6 +688,10 @@ class GridBasedPlacer:
         # Check in IO pads
         if inst_name in self.io_pads:
             return self.io_pads[inst_name].boundary.center()
+
+        # FIX 4: Check in MP sensors
+        if inst_name in self.mp_sensors:
+            return self.mp_sensors[inst_name].boundary.center()
 
         return None
 
@@ -707,9 +733,6 @@ class GridBasedPlacer:
                             f"Constraint C{idx} for elements {constraint.elements}: "
                             f"Target '{constraint.target_name or str(constraint.target_coords)}' not found or invalid."
                         )
-                        if target_point:  # This check is redundant but kept for safety
-                            self.ax_placement.text(target_point.x, target_point.y, "Failed!",
-                                                 color='red', fontsize=8, ha='center', va='center')
                         self._update_placement_visualization(idx)
                         continue
 
@@ -1021,7 +1044,6 @@ class GridBasedPlacer:
                 pin_cx = block.pin_box.center().x
                 pin_cy = block.pin_box.center().y
 
-
         # I/O pads
         for name, io in self.io_pads.items():
             io_rect = patches.Rectangle(
@@ -1034,6 +1056,15 @@ class GridBasedPlacer:
             cx = io.boundary.center().x
             cy = io.boundary.center().y
 
+        for name, sensor in self.mp_sensors.items():
+            sensor_rect = patches.Rectangle(
+                (sensor.boundary.llx, sensor.boundary.lly),
+                sensor.boundary.urx - sensor.boundary.llx,
+                sensor.boundary.ury - sensor.boundary.lly,
+                linewidth=1, edgecolor='orange', facecolor='lightyellow', alpha=0.6
+            )
+            ax.add_patch(sensor_rect)
+
         if self.die_boundary:
             ax.set_xlim(self.die_boundary.llx, self.die_boundary.urx)
             ax.set_ylim(self.die_boundary.lly, self.die_boundary.ury)
@@ -1045,6 +1076,7 @@ class GridBasedPlacer:
                 patches.Patch(color='wheat', label='Hard Blocks'),
                 patches.Patch(color='darkred', alpha=0.5, hatch='//', label='Blockages'),
                 patches.Patch(color='lightgreen', alpha=0.6, label='I/O Pads'),
+                patches.Patch(color='lightyellow', alpha=0.6, label='MP Sensors'),  # FIX 4: 新增圖例項目
                 patches.Patch(color='lightgray', alpha=0.3, label='Core Area')
             ]
             # 將圖例放在圖形外部右側，避免遮擋晶片
@@ -1065,7 +1097,8 @@ class GridBasedPlacer:
         # 添加說明文字 - 放在底部左側，更小的字體和半透明背景
         info_text = f"Die: {self.die_boundary.urx:.0f}x{self.die_boundary.ury:.0f} μm | "
         info_text += f"Core: ({self.core_area.llx:.0f},{self.core_area.lly:.0f})-({self.core_area.urx:.0f},{self.core_area.ury:.0f}) | "
-        info_text += f"Blocks: {len(self.blocks)} | Blockages: {len(self.blockages)} | I/O Pads: {len(self.io_pads)}"
+        info_text += f"Blocks: {len(self.blocks)} | Blockages: {len(self.blockages)} | "
+        info_text += f"I/O Pads: {len(self.io_pads)} | MP Sensors: {len(self.mp_sensors)}"  # FIX 4: 顯示 MP sensors 數量
         ax.text(0.02, 0.02, info_text, transform=ax.transAxes,
                 fontsize=9, verticalalignment='bottom',
                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.7, edgecolor='gray'))
@@ -1216,6 +1249,7 @@ class GridBasedPlacer:
             patches.Patch(color='wheat', label='Hard Blocks'), # 重新加入靜態圖例
             patches.Patch(color='darkred', alpha=0.5, hatch='//', label='Blockages'),
             patches.Patch(color='lightgreen', alpha=0.6, label='I/O Pads'),
+            patches.Patch(color='lightyellow', alpha=0.6, label='MP Sensors'),  # FIX 4: 新增圖例
             patches.Patch(color='lightgray', alpha=0.3, label='Core Area'),
             patches.Patch(color='gray', alpha=0.3, label='Instance Groups'),
             patches.Patch(color='purple', alpha=0.3, label='Pipe Stage Groups'),  # NEW
@@ -1225,21 +1259,23 @@ class GridBasedPlacer:
             plt.Line2D([0], [0], marker='s', color='gray', markersize=8, mew=1, linestyle='None', label='Pipe End')
         ]
         self.ax_placement.legend(handles=legend_elements_ax2, loc='upper center',
-                                bbox_to_anchor=(0.5, -0.08), ncol=5, fontsize=9)
+                                bbox_to_anchor=(0.5, -0.08), ncol=6, fontsize=9)
 
         plt.tight_layout(rect=[0, 0.08, 1, 0.95]) # 調整佈局以容納suptitle和底部圖例
         plt.show(block=False) # 非阻塞模式
 
     def _update_placement_visualization(self, current_constraint_idx: int):
+        """FIX 1: 修復視覺化標籤清理問題"""
         if self.fig is None:
             return
 
         # 更新網格圖
         self.grid_img.set_data(self.grid_map)
 
-        # 清除舊的放置結果 (動態添加的元素)
+        # 清除舊的放置結果 (包含所有動態添加的元素)
         for artist in self.placement_artists:
-            artist.remove()
+            if hasattr(artist, 'remove'):
+                artist.remove()
         self.placement_artists.clear()
 
         # 重新繪製約束目標點/起點/終點
@@ -1252,17 +1288,21 @@ class GridBasedPlacer:
                 self.placement_artists.append(artist)
                 artist_text = self.ax_placement.annotate(f'C{idx} Target', (target_point.x, target_point.y), fontsize=7, color=color,
                                      xytext=(5, 5), textcoords='offset points', bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', boxstyle='round,pad=0.1'), zorder=10)
+                self.placement_artists.append(artist_text)
             elif constraint.type == 'pipe':
                 if constraint.vis_start_point:
                     artist = self.ax_placement.plot(constraint.vis_start_point.x, constraint.vis_start_point.y, '^', color=color, markersize=8, mew=1, zorder=10)[0]
                     self.placement_artists.append(artist)
                     artist_text = self.ax_placement.annotate(f'C{idx} Start', (constraint.vis_start_point.x, constraint.vis_start_point.y), fontsize=7, color=color,
                                          xytext=(5, 5), textcoords='offset points', bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', boxstyle='round,pad=0.1'), zorder=10)
+                    self.placement_artists.append(artist_text)
+
                 if constraint.vis_end_point:
                     artist = self.ax_placement.plot(constraint.vis_end_point.x, constraint.vis_end_point.y, 's', color=color, markersize=8, mew=1, zorder=10)[0]
                     self.placement_artists.append(artist)
                     artist_text = self.ax_placement.annotate(f'C{idx} End', (constraint.vis_end_point.x, constraint.vis_end_point.y), fontsize=7, color=color,
                                          xytext=(5, 5), textcoords='offset points', bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', boxstyle='round,pad=0.1'), zorder=10)
+                    self.placement_artists.append(artist_text)
 
                 # 繪製 pipe 路徑 (如果存在) - 使用實際保存的路徑
                 if constraint.vis_pipe_path:
@@ -1271,7 +1311,6 @@ class GridBasedPlacer:
                     path_coords_y = [(p[1] + 0.5) * self.grid_size for p in path]
                     line, = self.ax_placement.plot(path_coords_x, path_coords_y, color=color, linestyle='--', linewidth=1, alpha=0.7, zorder=9)
                     self.placement_artists.append(line)
-
 
         # 重新繪製放置結果
         for name, data in self.placements.items():
@@ -1310,6 +1349,7 @@ class GridBasedPlacer:
                 cy = region.center().y
                 artist_text = self.ax_placement.text(cx, cy, name, ha='center', va='center',
                         fontsize=9, color='black', weight='bold', bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', boxstyle='round,pad=0.2'), zorder=6)
+                self.placement_artists.append(artist_text)
 
             elif data['type'] == 'instance':
                 pos = data['position']
@@ -1317,6 +1357,7 @@ class GridBasedPlacer:
                 self.placement_artists.append(artist)
                 artist_text = self.ax_placement.annotate(name, (pos.x, pos.y), fontsize=7, color='black',
                            xytext=(5, 5), textcoords='offset points', bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', boxstyle='round,pad=0.1'), zorder=8)
+                self.placement_artists.append(artist_text)
 
         self.fig.canvas.draw_idle()
         self.fig.canvas.flush_events() # 刷新事件，確保圖形更新
@@ -1337,6 +1378,7 @@ class GridBasedPlacer:
         print(f"    ✓ Loaded design with {len(self.blocks)} blocks")
         print(f"    ✓ Loaded {len(self.blockages)} blockages")
         print(f"    ✓ Loaded {len(self.io_pads)} I/O pads from TVC JSON")
+        print(f"    ✓ Loaded {len(self.mp_sensors)} MP sensors from TVC JSON")
 
         self.load_constraints(constraints)
         print(f"    ✓ Loaded {len(self.constraints)} constraints")
@@ -1505,13 +1547,31 @@ def create_test_files_with_blockages():
                 ]
             }
         },
-        # 新增 IPS 區塊以提供 I/O Pad 的尺寸資訊
+        # 新增 Solution_MP_SENSOR 區塊
+        "Solution_MP_SENSOR": {
+            "SoIC_A16_eTV5_root": {
+                "MP_SENSOR": [
+                    {
+                        "Name": "mp_sensor_1",
+                        "Location": [1500, 500],
+                        "CellName": "MP_SENSOR_TYPE1"
+                    },
+                    {
+                        "Name": "mp_sensor_2",
+                        "Location": [1800, 1500],
+                        "CellName": "MP_SENSOR_TYPE1"
+                    }
+                ]
+            }
+        },
+        # 新增 IPS 區塊以提供 I/O Pad 和 MP Sensor 的尺寸資訊
         "IPS": {
             "PVDD1CODCDGM_H": {"SIZE_X": 30.0, "SIZE_Y": 52.91},
             "PVDD08CODCDGM_H": {"SIZE_X": 30.0, "SIZE_Y": 52.91},
             "PVDD1204CODCDGM_H": {"SIZE_X": 30.0, "SIZE_Y": 52.91},
             "VDD_CORNER": {"SIZE_X": 30.0, "SIZE_Y": 30.0}, # 假設角落 I/O Pad 尺寸
             "PAD_CELL": {"SIZE_X": 30.0, "SIZE_Y": 30.0},
+            "MP_SENSOR_TYPE1": {"SIZE_X": 50.0, "SIZE_Y": 50.0},  # MP sensor 尺寸
             # 也可以包含 Blocks 的 IP 尺寸
             "BLOCK1": {"SIZE_X": 500.0, "SIZE_Y": 500.0},
             "BLOCK2": {"SIZE_X": 500.0, "SIZE_Y": 500.0}
@@ -1557,6 +1617,14 @@ def create_test_files_with_blockages():
         f.write("Target Type: cell\n")
         f.write("Target: u_block2\n")
         f.write("Element: u_test/inst5\n")
+        f.write("Element Type: single\n")
+        f.write("Area: 20.0\n\n")
+
+        # Test MP sensor as target
+        f.write("Preplace Type: close to target\n")
+        f.write("Target Type: cell\n")
+        f.write("Target: mp_sensor_1\n")
+        f.write("Element: u_test/inst6\n")
         f.write("Element Type: single\n")
         f.write("Area: 20.0\n\n")
 
