@@ -4,6 +4,7 @@ Grid-Based Pre-placement Tool with Blockage Support
 使用網格結構和 A* 演算法的預放置工具
 Modified to process close_to_target first, then pipe
 Pipe stages are now treated as instance groups
+Added support for target_type: sram
 """
 
 import json
@@ -110,7 +111,7 @@ class Constraint:
     elements: List[str] = field(default_factory=list) # 受影響的元件列表
 
     # close_to_target 相關
-    target_type: Optional[str] = None # 'cell', 'coords', 'pin'
+    target_type: Optional[str] = None # 'cell', 'coords', 'pin', 'sram'  # Added 'sram'
     target_name: Optional[str] = None # 目標名稱 (cell)
     target_coords: Optional[Point] = None # 目標座標 (coords)
 
@@ -133,7 +134,7 @@ class Constraint:
             target_info = ""
             if self.target_type == 'coords' and self.target_coords:
                 target_info = f"coords={self.target_coords}"
-            elif self.target_type in ['cell', 'pin'] and self.target_name:
+            elif self.target_type in ['cell', 'pin', 'sram'] and self.target_name:  # Added 'sram'
                 target_info = f"{self.target_type}='{self.target_name}'"
             return f"Constraint(Type='{self.type}', Target={target_info})"
         elif self.type == 'pipe':
@@ -368,7 +369,7 @@ class GridBasedPlacer:
                                         float(match_coords.group(1)),
                                         float(match_coords.group(2))
                                     )
-                            else: # 'cell' 或 'pin'
+                            else: # 'cell' or 'pin' or 'sram'
                                 constraint.target_name = target_value
                         elif line.startswith('Element Type:'):
                             constraint.element_type = line.split(':')[1].strip()
@@ -586,7 +587,92 @@ class GridBasedPlacer:
                     return mp_sensor.pin_box.center()
                 else:
                     return mp_sensor.boundary.center()
+        elif constraint.target_type == 'sram':  # New: SRAM target type
+            # For SRAM, we don't return a single target point
+            # The processing is handled differently in process_constraints
+            return None
         return None
+
+    def determine_pin_edge(self, block: Block) -> str:
+        """
+        Determine which edge of the block contains the pin_box.
+        Returns: 'left', 'right', 'top', or 'bottom'
+        """
+        if not block.pin_box:
+            return 'bottom'  # Default if no pin_box
+
+        pin_center = block.pin_box.center()
+        block_center = block.boundary.center()
+
+        # Calculate distances from pin center to each edge
+        dist_left = abs(pin_center.x - block.boundary.llx)
+        dist_right = abs(pin_center.x - block.boundary.urx)
+        dist_bottom = abs(pin_center.y - block.boundary.lly)
+        dist_top = abs(pin_center.y - block.boundary.ury)
+
+        # Find the minimum distance
+        min_dist = min(dist_left, dist_right, dist_bottom, dist_top)
+
+        # Return the corresponding edge
+        if min_dist == dist_left:
+            return 'left'
+        elif min_dist == dist_right:
+            return 'right'
+        elif min_dist == dist_bottom:
+            return 'bottom'
+        else:
+            return 'top'
+
+    def allocate_sram_region(self, target_block: Block, area: float) -> Optional[Rectangle]:
+        """
+        Allocate a rectangular region for SRAM placement.
+        The region will have one edge matching the pin edge of the target block.
+        """
+        pin_edge = self.determine_pin_edge(target_block)
+
+        # Calculate dimensions based on pin edge
+        if pin_edge in ['left', 'right']:
+            # Vertical edge - height matches block height
+            edge_length = target_block.boundary.ury - target_block.boundary.lly
+            other_length = area / edge_length
+
+            if pin_edge == 'left':
+                # Place to the left of the block
+                return Rectangle(
+                    target_block.boundary.llx - other_length,
+                    target_block.boundary.lly,
+                    target_block.boundary.llx,
+                    target_block.boundary.ury
+                )
+            else:  # right
+                # Place to the right of the block
+                return Rectangle(
+                    target_block.boundary.urx,
+                    target_block.boundary.lly,
+                    target_block.boundary.urx + other_length,
+                    target_block.boundary.ury
+                )
+        else:  # top or bottom
+            # Horizontal edge - width matches block width
+            edge_length = target_block.boundary.urx - target_block.boundary.llx
+            other_length = area / edge_length
+
+            if pin_edge == 'bottom':
+                # Place below the block
+                return Rectangle(
+                    target_block.boundary.llx,
+                    target_block.boundary.lly - other_length,
+                    target_block.boundary.urx,
+                    target_block.boundary.lly
+                )
+            else:  # top
+                # Place above the block
+                return Rectangle(
+                    target_block.boundary.llx,
+                    target_block.boundary.ury,
+                    target_block.boundary.urx,
+                    target_block.boundary.ury + other_length
+                )
 
     def allocate_region(self, area: float, near_point: Point) -> Optional[Rectangle]:
         """為實例群組分配矩形區域"""
@@ -761,69 +847,92 @@ class GridBasedPlacer:
 
             try:
                 if constraint.type == 'close_to_target':
-                    target_point = self.get_target_point_for_constraint(constraint)
+                    # Handle SRAM target type specially
+                    if constraint.target_type == 'sram':
+                        if constraint.target_name not in self.blocks:
+                            self.failed_constraints.append(
+                                f"Constraint C{idx} for elements {constraint.elements}: "
+                                f"Target block '{constraint.target_name}' not found for SRAM placement."
+                            )
+                            self._update_placement_visualization(idx)
+                            continue
 
-                    if not target_point:
-                        self.failed_constraints.append(
-                            f"Constraint C{idx} for elements {constraint.elements}: "
-                            f"Target '{constraint.target_name or str(constraint.target_coords)}' not found or invalid."
-                        )
-                        self._update_placement_visualization(idx)
-                        continue
-
-                    constraint.vis_target_point = target_point
-
-                    # 處理 module 和 instancesgroup 相同
-                    if constraint.element_type in ['instancesgroup', 'module']:
-                        group_name = f"TVC_INST_GROUP_{group_id}"
+                        target_block = self.blocks[constraint.target_name]
+                        group_name = f"TVC_SRAM_GROUP_{group_id}"
                         group_id += 1
 
-                        region = self.allocate_region(constraint.area, target_point)
+                        # Allocate SRAM region adjacent to pin edge
+                        region = self.allocate_sram_region(target_block, constraint.area)
 
                         if region:
+                            # Mark the region as RESERVED in the grid
+                            llx_grid, lly_grid, urx_grid, ury_grid = region.to_grid_region(self.grid_size)
+                            for y_grid in range(lly_grid, ury_grid):
+                                for x_grid in range(llx_grid, urx_grid):
+                                    if self.is_valid_grid_coord(x_grid, y_grid):
+                                        self.grid_map[y_grid, x_grid] = self.GRID_RESERVED
+
                             self.placements[group_name] = {
                                 'type': 'group',
                                 'region': region,
                                 'instances': constraint.elements,
-                                'constraint_idx': idx
+                                'constraint_idx': idx,
+                                'is_sram': True  # Mark as SRAM group for visualization
                             }
 
-                            # NEW: Record each instance in the group at the center of the region
+                            # Record each instance in the group at the center of the region
                             center_point = region.center()
                             for element in constraint.elements:
                                 self.instance_locations[element] = center_point
-                                print(f"  → Placed {element} in group {group_name} at center {center_point}")
+                                print(f"  → Placed {element} in SRAM group {group_name} at center {center_point}")
+
+                            # For visualization, set a target point at the pin center
+                            if target_block.pin_box:
+                                constraint.vis_target_point = target_block.pin_box.center()
+                            else:
+                                constraint.vis_target_point = target_block.boundary.center()
                         else:
                             self.failed_constraints.append(
                                 f"Constraint C{idx} ({group_name}, elements: {constraint.elements}): "
-                                f"Cannot allocate region for area {constraint.area} (no free space found)."
+                                f"Cannot allocate SRAM region for area {constraint.area}."
                             )
+                    else:  # Original close_to_target logic
+                        target_point = self.get_target_point_for_constraint(constraint)
 
-                    else:  # single instance
-                        position_grid = self.find_nearest_free_grid(target_point)
-
-                        if position_grid:
-                            # Mark grid as BLOCKED
-                            self.grid_map[position_grid[1], position_grid[0]] = self.GRID_BLOCKED
-
-                            position = Point(
-                                (position_grid[0] + 0.5) * self.grid_size,
-                                (position_grid[1] + 0.5) * self.grid_size
+                        if not target_point:
+                            self.failed_constraints.append(
+                                f"Constraint C{idx} for elements {constraint.elements}: "
+                                f"Target '{constraint.target_name or str(constraint.target_coords)}' not found or invalid."
                             )
-                            for element in constraint.elements:
-                                self.placements[element] = {
-                                    'type': 'instance',
-                                    'position': position,
+                            self._update_placement_visualization(idx)
+                            continue
+
+                        constraint.vis_target_point = target_point
+
+                        # 處理 module 和 instancesgroup 相同
+                        if constraint.element_type in ['instancesgroup', 'module']:
+                            group_name = f"TVC_INST_GROUP_{group_id}"
+                            group_id += 1
+
+                            region = self.allocate_region(constraint.area, target_point)
+
+                            if region:
+                                self.placements[group_name] = {
+                                    'type': 'group',
+                                    'region': region,
+                                    'instances': constraint.elements,
                                     'constraint_idx': idx
                                 }
-                                # NEW: Record instance location
-                                self.instance_locations[element] = position
-                                print(f"  → Placed {element} at {position}")
-                        else:
-                            for element in constraint.elements:
+
+                                # NEW: Record each instance in the group at the center of the region
+                                center_point = region.center()
+                                for element in constraint.elements:
+                                    self.instance_locations[element] = center_point
+                                    print(f"  → Placed {element} in group {group_name} at center {center_point}")
+                            else:
                                 self.failed_constraints.append(
-                                    f"Constraint C{idx} ({element}): Cannot find placement near target "
-                                    f"'{constraint.target_name or str(constraint.target_coords)}' (no free space found)."
+                                    f"Constraint C{idx} ({group_name}, elements: {constraint.elements}): "
+                                    f"Cannot allocate region for area {constraint.area} (no free space found)."
                                 )
 
                 elif constraint.type == 'pipe':
@@ -1288,6 +1397,7 @@ class GridBasedPlacer:
             patches.Patch(color='lightgray', alpha=0.3, label='Core Area'),
             patches.Patch(color='gray', alpha=0.3, label='Instance Groups'),
             patches.Patch(color='purple', alpha=0.3, label='Pipe Stage Groups'),  # NEW
+            patches.Patch(color='cyan', alpha=0.4, label='SRAM Groups'),  # Added for SRAM
             plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='gray', markersize=8, label='Single Instances', markeredgecolor='black'),
             plt.Line2D([0], [0], marker='x', color='gray', markersize=10, mew=2, linestyle='None', label='Target Point'),
             plt.Line2D([0], [0], marker='^', color='gray', markersize=8, mew=1, linestyle='None', label='Pipe Start'),  # 改為三角形
@@ -1354,10 +1464,21 @@ class GridBasedPlacer:
 
             if data['type'] == 'group':
                 region = data['region']
-                # Different style for pipe stage groups
+                # Different style for pipe stage groups and SRAM groups
                 is_pipe_stage = data.get('is_pipe_stage', False)
+                is_sram = data.get('is_sram', False)
 
-                if is_pipe_stage:
+                if is_sram:
+                    # SRAM groups - cyan color with solid line
+                    group_rect = patches.Rectangle(
+                        (region.llx, region.lly),
+                        region.urx - region.llx,
+                        region.ury - region.lly,
+                        linewidth=2.5, edgecolor=color,
+                        facecolor='cyan', alpha=0.4, zorder=5,
+                        linestyle='-'  # Solid line for SRAM
+                    )
+                elif is_pipe_stage:
                     # Pipe stage groups - smaller, different color scheme
                     group_rect = patches.Rectangle(
                         (region.llx, region.lly),
@@ -1421,9 +1542,12 @@ class GridBasedPlacer:
         # Count constraint types
         close_count = sum(1 for c in self.constraints if c.type == 'close_to_target')
         pipe_count = sum(1 for c in self.constraints if c.type == 'pipe')
-        print(f"    ✓ Constraint types: {close_count} close_to_target, {pipe_count} pipe")
+        sram_count = sum(1 for c in self.constraints if c.type == 'close_to_target' and c.target_type == 'sram')
+        print(f"    ✓ Constraint types: {close_count} close_to_target ({sram_count} SRAM), {pipe_count} pipe")
         print(f"    ✓ Processing order: close_to_target first, then pipe")
         print(f"    ✓ Pipe constraints will create stage groups (one grid per stage)")
+        if sram_count > 0:
+            print(f"    ✓ SRAM constraints will place groups adjacent to target block pin edges")
 
         # 視覺化原始設計佈局 (步驟 1)
         print("\n[VISUALIZATION] Step 1: Showing initial design layout...")
@@ -1517,3 +1641,4 @@ if __name__ == "__main__":
             tvc_json='test_tvc_blockage.json',
             constraints='test_constraints.phy'
         )
+
