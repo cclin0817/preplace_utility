@@ -94,12 +94,14 @@ class IOPad:
     """I/O Pad 資料結構"""
     name: str
     boundary: Rectangle
+    pin_box: Optional[Rectangle] = None
 
 @dataclass
 class MPSensor:
     """MP Sensor 資料結構"""
     name: str
     boundary: Rectangle
+    pin_box: Optional[Rectangle] = None
 
 @dataclass
 class Constraint:
@@ -266,7 +268,8 @@ class GridBasedPlacer:
 
                         self.mp_sensors[name] = MPSensor(
                             name=name,
-                            boundary=Rectangle(llx, lly, urx, ury)
+                            boundary=Rectangle(llx, lly, urx, ury),
+                            pin_box=None  # 初始為None，之後可實作
                         )
                     else:
                         print(f"警告: MP_SENSOR '{name}' 的 CellName '{cell_name}' 在 IP 尺寸中未找到，跳過。")
@@ -314,7 +317,8 @@ class GridBasedPlacer:
 
                         self.io_pads[name] = IOPad(
                             name=name,
-                            boundary=Rectangle(llx, lly, urx, ury)
+                            boundary=Rectangle(llx, lly, urx, ury),
+                            pin_box=None  # 初始為None，之後可實作
                         )
                     else:
                         print(f"警告: I/O Pad '{name}' 的 CellName '{cell_name}' 在 IP 尺寸中未找到，跳過。")
@@ -560,15 +564,28 @@ class GridBasedPlacer:
             print(f"      可用的 I/O pads: {list(self.io_pads.keys())}")
             print(f"      可用的 MP sensors: {list(self.mp_sensors.keys())}")
         elif constraint.target_type == 'cell':
-            # 對於 cell 類型，直接查找
+            # 對於 cell 類型，檢查pin_box是否存在
             if constraint.target_name in self.blocks:
                 block = self.blocks[constraint.target_name]
-                # cell 類型通常使用 boundary 中心，除非特別需要 pin_box
-                return block.boundary.center()
+                # 優先使用pin_box，如果不存在則使用boundary中心
+                if block.pin_box:
+                    return block.pin_box.center()
+                else:
+                    return block.boundary.center()
             elif constraint.target_name in self.io_pads:
-                return self.io_pads[constraint.target_name].boundary.center()
+                io_pad = self.io_pads[constraint.target_name]
+                # 優先使用pin_box，如果不存在則使用boundary中心
+                if io_pad.pin_box:
+                    return io_pad.pin_box.center()
+                else:
+                    return io_pad.boundary.center()
             elif constraint.target_name in self.mp_sensors:
-                return self.mp_sensors[constraint.target_name].boundary.center()
+                mp_sensor = self.mp_sensors[constraint.target_name]
+                # 優先使用pin_box，如果不存在則使用boundary中心
+                if mp_sensor.pin_box:
+                    return mp_sensor.pin_box.center()
+                else:
+                    return mp_sensor.boundary.center()
         return None
 
     def allocate_region(self, area: float, near_point: Point) -> Optional[Rectangle]:
