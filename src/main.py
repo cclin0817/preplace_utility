@@ -4,7 +4,7 @@ Grid-Based Pre-placement Tool with Blockage Support
 使用網格結構和 A* 演算法的預放置工具
 Modified to process close_to_target first, then pipe
 Pipe stages are now treated as instance groups
-Added support for target_type: sram
+Added support for target_type: sram and sram_group
 """
 
 import json
@@ -111,9 +111,10 @@ class Constraint:
     elements: List[str] = field(default_factory=list) # 受影響的元件列表
 
     # close_to_target 相關
-    target_type: Optional[str] = None # 'cell', 'coords', 'pin', 'sram'  # Added 'sram'
-    target_name: Optional[str] = None # 目標名稱 (cell)
+    target_type: Optional[str] = None # 'cell', 'coords', 'pin', 'sram', 'sram_group'  # Added 'sram_group'
+    target_name: Optional[str] = None # 目標名稱 (cell) or space-separated list for sram_group
     target_coords: Optional[Point] = None # 目標座標 (coords)
+    target_blocks: Optional[List[str]] = None  # NEW: For sram_group, list of block names
 
     # pipe 相關
     start: Optional[str] = None   # pipe 起點元件
@@ -128,14 +129,17 @@ class Constraint:
     vis_start_point: Optional[Point] = None  # pipe 實際解析出的起點
     vis_end_point: Optional[Point] = None    # pipe 實際解析出的終點
     vis_pipe_path: Optional[List[Tuple[int, int]]] = None  # pipe 實際使用的路徑
+    vis_bounding_rect: Optional[Rectangle] = None  # NEW: For sram_group bounding rectangle
 
     def __str__(self):
         if self.type == 'close_to_target':
             target_info = ""
             if self.target_type == 'coords' and self.target_coords:
                 target_info = f"coords={self.target_coords}"
-            elif self.target_type in ['cell', 'pin', 'sram'] and self.target_name:  # Added 'sram'
+            elif self.target_type in ['cell', 'pin', 'sram'] and self.target_name:
                 target_info = f"{self.target_type}='{self.target_name}'"
+            elif self.target_type == 'sram_group' and self.target_blocks:  # NEW
+                target_info = f"sram_group={self.target_blocks}"
             return f"Constraint(Type='{self.type}', Target={target_info})"
         elif self.type == 'pipe':
             num_stages = len(self.stages) if self.stages else 0
@@ -369,6 +373,9 @@ class GridBasedPlacer:
                                         float(match_coords.group(1)),
                                         float(match_coords.group(2))
                                     )
+                            elif constraint.target_type == 'sram_group':  # NEW: Parse multiple blocks
+                                constraint.target_blocks = target_value.split()
+                                constraint.target_name = target_value  # Keep original string for compatibility
                             else: # 'cell' or 'pin' or 'sram'
                                 constraint.target_name = target_value
                         elif line.startswith('Element Type:'):
@@ -462,6 +469,103 @@ class GridBasedPlacer:
             for gy in range(y1, y2):
                 for gx in range(x1, x2):
                     self.grid_map[gy, gx] = self.GRID_BLOCKED
+
+    def find_max_rectangle_in_region(self, bounding_rect: Rectangle) -> Optional[Rectangle]:
+        """
+        Find the largest rectangle of FREE grids within the given bounding rectangle.
+        Uses an approximate algorithm for efficiency.
+        """
+        # Convert bounding rectangle to grid coordinates
+        grid_llx, grid_lly, grid_urx, grid_ury = bounding_rect.to_grid_region(self.grid_size)
+
+        # Clamp to valid grid bounds
+        grid_llx = max(0, grid_llx)
+        grid_lly = max(0, grid_lly)
+        grid_urx = min(self.grid_width, grid_urx)
+        grid_ury = min(self.grid_height, grid_ury)
+
+        if grid_llx >= grid_urx or grid_lly >= grid_ury:
+            return None
+
+        # Extract the sub-grid within the bounding rectangle
+        sub_grid = self.grid_map[grid_lly:grid_ury, grid_llx:grid_urx]
+        rows, cols = sub_grid.shape
+
+        if rows == 0 or cols == 0:
+            return None
+
+        # Use a simplified maximal rectangle algorithm
+        # For each row, calculate the height of consecutive FREE cells above
+        heights = np.zeros((rows, cols), dtype=int)
+
+        for i in range(rows):
+            for j in range(cols):
+                if sub_grid[i, j] == self.GRID_FREE:
+                    if i == 0:
+                        heights[i, j] = 1
+                    else:
+                        heights[i, j] = heights[i-1, j] + 1
+                else:
+                    heights[i, j] = 0
+
+        max_area = 0
+        best_rect = None
+        best_distance = float('inf')
+        bounding_center = bounding_rect.center()
+
+        # For each row, find the maximum rectangle using histogram approach
+        for i in range(rows):
+            # Find maximum rectangle in histogram heights[i]
+            for j in range(cols):
+                if heights[i, j] == 0:
+                    continue
+
+                # Expand left and right to find width
+                width = 1
+                min_height = heights[i, j]
+
+                # Expand left
+                left = j
+                while left > 0 and heights[i, left-1] > 0:
+                    left -= 1
+                    min_height = min(min_height, heights[i, left])
+
+                # Expand right
+                right = j
+                while right < cols - 1 and heights[i, right+1] > 0:
+                    right += 1
+                    min_height = min(min_height, heights[i, right])
+
+                # Calculate area
+                width = right - left + 1
+                area = width * min_height
+
+                # Calculate the actual rectangle coordinates
+                rect_grid_llx = grid_llx + left
+                rect_grid_lly = grid_lly + i - min_height + 1
+                rect_grid_urx = grid_llx + right + 1
+                rect_grid_ury = grid_lly + i + 1
+
+                # Convert back to real coordinates
+                rect = Rectangle(
+                    rect_grid_llx * self.grid_size,
+                    rect_grid_lly * self.grid_size,
+                    rect_grid_urx * self.grid_size,
+                    rect_grid_ury * self.grid_size
+                )
+
+                # Calculate distance to bounding center
+                rect_center = rect.center()
+                distance = ((rect_center.x - bounding_center.x)**2 +
+                           (rect_center.y - bounding_center.y)**2)**0.5
+
+                # Choose the rectangle with largest area, or closest to center if tied
+                if area > max_area or (area == max_area and distance < best_distance):
+                    max_area = area
+                    best_rect = rect
+                    best_distance = distance
+
+        return best_rect
 
     def find_nearest_free_grid(self, target: Point) -> Optional[Tuple[int, int]]:
         """
@@ -587,9 +691,11 @@ class GridBasedPlacer:
                     return mp_sensor.pin_box.center()
                 else:
                     return mp_sensor.boundary.center()
-        elif constraint.target_type == 'sram':  # New: SRAM target type
+        elif constraint.target_type == 'sram':  # Existing SRAM target type
             # For SRAM, we don't return a single target point
             # The processing is handled differently in process_constraints
+            return None
+        elif constraint.target_type == 'sram_group':  # NEW: sram_group doesn't have a single target point
             return None
         return None
 
@@ -847,8 +953,91 @@ class GridBasedPlacer:
 
             try:
                 if constraint.type == 'close_to_target':
+                    # Handle SRAM_GROUP target type - NEW
+                    if constraint.target_type == 'sram_group':
+                        if not constraint.target_blocks:
+                            self.failed_constraints.append(
+                                f"Constraint C{idx} for elements {constraint.elements}: "
+                                f"No target blocks specified for sram_group."
+                            )
+                            self._update_placement_visualization(idx)
+                            continue
+
+                        # Check all blocks exist
+                        missing_blocks = []
+                        for block_name in constraint.target_blocks:
+                            if block_name not in self.blocks:
+                                missing_blocks.append(block_name)
+
+                        if missing_blocks:
+                            self.failed_constraints.append(
+                                f"Constraint C{idx} for elements {constraint.elements}: "
+                                f"Target blocks not found: {missing_blocks}"
+                            )
+                            self._update_placement_visualization(idx)
+                            continue
+
+                        # Calculate bounding rectangle for all target blocks
+                        min_llx = float('inf')
+                        min_lly = float('inf')
+                        max_urx = float('-inf')
+                        max_ury = float('-inf')
+
+                        for block_name in constraint.target_blocks:
+                            block = self.blocks[block_name]
+                            min_llx = min(min_llx, block.boundary.llx)
+                            min_lly = min(min_lly, block.boundary.lly)
+                            max_urx = max(max_urx, block.boundary.urx)
+                            max_ury = max(max_ury, block.boundary.ury)
+
+                        bounding_rect = Rectangle(min_llx, min_lly, max_urx, max_ury)
+                        constraint.vis_bounding_rect = bounding_rect  # Save for visualization
+
+                        # Find largest free rectangle within bounding rect
+                        region = self.find_max_rectangle_in_region(bounding_rect)
+
+                        if region:
+                            actual_area = (region.urx - region.llx) * (region.ury - region.lly)
+                            required_area = constraint.area
+
+                            # Check if area is sufficient and show warning if not
+                            if actual_area < required_area:
+                                print(f"  ⚠ Warning: Found area ({actual_area:.2f}) is smaller than required ({required_area:.2f})")
+
+                            group_name = f"TVC_SRAM_MULTI_GROUP_{group_id}"
+                            group_id += 1
+
+                            # Mark the region as RESERVED in the grid
+                            llx_grid, lly_grid, urx_grid, ury_grid = region.to_grid_region(self.grid_size)
+                            for y_grid in range(lly_grid, ury_grid):
+                                for x_grid in range(llx_grid, urx_grid):
+                                    if self.is_valid_grid_coord(x_grid, y_grid):
+                                        if self.grid_map[y_grid, x_grid] == self.GRID_FREE:
+                                            self.grid_map[y_grid, x_grid] = self.GRID_RESERVED
+
+                            self.placements[group_name] = {
+                                'type': 'group',
+                                'region': region,
+                                'instances': constraint.elements,
+                                'constraint_idx': idx,
+                                'is_sram_group': True  # Mark as SRAM multi-block group
+                            }
+
+                            # Record each instance in the group at the center of the region
+                            center_point = region.center()
+                            for element in constraint.elements:
+                                self.instance_locations[element] = center_point
+                                print(f"  → Placed {element} in SRAM multi-block group {group_name} at center {center_point}")
+
+                            # For visualization, set target point at bounding rect center
+                            constraint.vis_target_point = bounding_rect.center()
+                        else:
+                            self.failed_constraints.append(
+                                f"Constraint C{idx} for elements {constraint.elements}: "
+                                f"Cannot find any free rectangle within bounding region of blocks {constraint.target_blocks}."
+                            )
                     # Handle SRAM target type specially
-                    if constraint.target_type == 'sram':
+                    elif constraint.target_type == 'sram':
                         if constraint.target_name not in self.blocks:
                             self.failed_constraints.append(
                                 f"Constraint C{idx} for elements {constraint.elements}: "
@@ -1397,14 +1586,15 @@ class GridBasedPlacer:
             patches.Patch(color='lightgray', alpha=0.3, label='Core Area'),
             patches.Patch(color='gray', alpha=0.3, label='Instance Groups'),
             patches.Patch(color='purple', alpha=0.3, label='Pipe Stage Groups'),  # NEW
-            patches.Patch(color='cyan', alpha=0.4, label='SRAM Groups'),  # Added for SRAM
+            patches.Patch(color='cyan', alpha=0.4, label='SRAM Groups'),  # for single-block SRAM
+            patches.Patch(color='magenta', alpha=0.4, label='SRAM Multi-Block Groups'),  # NEW for multi-block
             plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='gray', markersize=8, label='Single Instances', markeredgecolor='black'),
             plt.Line2D([0], [0], marker='x', color='gray', markersize=10, mew=2, linestyle='None', label='Target Point'),
             plt.Line2D([0], [0], marker='^', color='gray', markersize=8, mew=1, linestyle='None', label='Pipe Start'),  # 改為三角形
             plt.Line2D([0], [0], marker='s', color='gray', markersize=8, mew=1, linestyle='None', label='Pipe End')
         ]
         self.ax_placement.legend(handles=legend_elements_ax2, loc='upper center',
-                                bbox_to_anchor=(0.5, -0.08), ncol=6, fontsize=9)
+                                bbox_to_anchor=(0.5, -0.08), ncol=7, fontsize=9)
 
         plt.tight_layout(rect=[0, 0.08, 1, 0.95]) # 調整佈局以容納suptitle和底部圖例
         plt.show(block=False) # 非阻塞模式
@@ -1427,13 +1617,37 @@ class GridBasedPlacer:
         for idx, constraint in enumerate(self.constraints):
             color = self.cmap_constraints(idx / len(self.constraints))
 
-            if constraint.type == 'close_to_target' and constraint.vis_target_point:
-                target_point = constraint.vis_target_point
-                artist = self.ax_placement.plot(target_point.x, target_point.y, 'x', color=color, markersize=10, mew=2, zorder=10)[0]
-                self.placement_artists.append(artist)
-                artist_text = self.ax_placement.annotate(f'C{idx} Target', (target_point.x, target_point.y), fontsize=7, color=color,
+            if constraint.type == 'close_to_target':
+                # Draw bounding rectangle for sram_group - NEW
+                if constraint.target_type == 'sram_group' and constraint.vis_bounding_rect:
+                    bounding_rect = constraint.vis_bounding_rect
+                    bound_rect_patch = patches.Rectangle(
+                        (bounding_rect.llx, bounding_rect.lly),
+                        bounding_rect.urx - bounding_rect.llx,
+                        bounding_rect.ury - bounding_rect.lly,
+                        linewidth=2, edgecolor=color,
+                        facecolor='none', linestyle='--', zorder=8
+                    )
+                    self.ax_placement.add_patch(bound_rect_patch)
+                    self.placement_artists.append(bound_rect_patch)
+
+                    # Add label for bounding rect
+                    artist_text = self.ax_placement.text(
+                        bounding_rect.center().x, bounding_rect.ury + 10,
+                        f'C{idx} Bounding', ha='center', va='bottom',
+                        fontsize=8, color=color,
+                        bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', boxstyle='round,pad=0.1'),
+                        zorder=10
+                    )
+                    self.placement_artists.append(artist_text)
+
+                if constraint.vis_target_point:
+                    target_point = constraint.vis_target_point
+                    artist = self.ax_placement.plot(target_point.x, target_point.y, 'x', color=color, markersize=10, mew=2, zorder=10)[0]
+                    self.placement_artists.append(artist)
+                    artist_text = self.ax_placement.annotate(f'C{idx} Target', (target_point.x, target_point.y), fontsize=7, color=color,
                                      xytext=(5, 5), textcoords='offset points', bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', boxstyle='round,pad=0.1'), zorder=10)
-                self.placement_artists.append(artist_text)
+                    self.placement_artists.append(artist_text)
             elif constraint.type == 'pipe':
                 if constraint.vis_start_point:
                     artist = self.ax_placement.plot(constraint.vis_start_point.x, constraint.vis_start_point.y, '^', color=color, markersize=8, mew=1, zorder=10)[0]
@@ -1467,8 +1681,18 @@ class GridBasedPlacer:
                 # Different style for pipe stage groups and SRAM groups
                 is_pipe_stage = data.get('is_pipe_stage', False)
                 is_sram = data.get('is_sram', False)
+                is_sram_group = data.get('is_sram_group', False)  # NEW
 
-                if is_sram:
+                if is_sram_group:  # NEW: SRAM multi-block groups - magenta color
+                    group_rect = patches.Rectangle(
+                        (region.llx, region.lly),
+                        region.urx - region.llx,
+                        region.ury - region.lly,
+                        linewidth=2.5, edgecolor=color,
+                        facecolor='magenta', alpha=0.4, zorder=5,
+                        linestyle='-'  # Solid line
+                    )
+                elif is_sram:
                     # SRAM groups - cyan color with solid line
                     group_rect = patches.Rectangle(
                         (region.llx, region.lly),
@@ -1543,11 +1767,14 @@ class GridBasedPlacer:
         close_count = sum(1 for c in self.constraints if c.type == 'close_to_target')
         pipe_count = sum(1 for c in self.constraints if c.type == 'pipe')
         sram_count = sum(1 for c in self.constraints if c.type == 'close_to_target' and c.target_type == 'sram')
-        print(f"    ✓ Constraint types: {close_count} close_to_target ({sram_count} SRAM), {pipe_count} pipe")
+        sram_group_count = sum(1 for c in self.constraints if c.type == 'close_to_target' and c.target_type == 'sram_group')  # NEW
+        print(f"    ✓ Constraint types: {close_count} close_to_target ({sram_count} SRAM, {sram_group_count} SRAM_GROUP), {pipe_count} pipe")
         print(f"    ✓ Processing order: close_to_target first, then pipe")
         print(f"    ✓ Pipe constraints will create stage groups (one grid per stage)")
         if sram_count > 0:
             print(f"    ✓ SRAM constraints will place groups adjacent to target block pin edges")
+        if sram_group_count > 0:  # NEW
+            print(f"    ✓ SRAM_GROUP constraints will find max rectangle within bounding box of multiple blocks")
 
         # 視覺化原始設計佈局 (步驟 1)
         print("\n[VISUALIZATION] Step 1: Showing initial design layout...")
@@ -1641,4 +1868,3 @@ if __name__ == "__main__":
             tvc_json='test_tvc_blockage.json',
             constraints='test_constraints.phy'
         )
-
