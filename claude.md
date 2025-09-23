@@ -18,6 +18,7 @@
 - **多種約束類型支援**：
   - `close_to_target`：將元件放置在目標點附近
     - 支援 SRAM 特殊放置（根據 pin edge 自動決定放置位置）
+    - 支援 SRAM_GROUP 放置（在多個區塊的邊界框內尋找最大可用矩形）
   - `pipe`：沿著路徑放置一系列元件群組（DFT scan chain）
 - **三步驟視覺化除錯**：
   - Step 1: 初始設計佈局
@@ -25,7 +26,9 @@
   - Step 3: 即時約束處理和放置結果
 - **完整的障礙物處理**：支援硬區塊（hard blocks）和阻擋區域（blockages）
 - **整合式 I/O 和 MP_SENSOR 處理**：直接從 TVC JSON 載入所有設計元件
-- **SRAM 智能放置**：根據目標區塊的 pin box 位置自動決定 SRAM 群組的最佳放置邊
+- **SRAM 智能放置**：
+  - 單一目標區塊：根據 pin box 位置自動決定最佳放置邊
+  - 多個目標區塊：在邊界框內找出最大可用矩形區域
 
 ## 🚀 快速開始
 
@@ -110,33 +113,60 @@ python example.py
 
 #### Close-to-Target 約束
 
-將元件放置在指定目標附近：
+將元件群組放置在指定目標附近（注意：不再支援 single element type）：
 
 ```
 Preplace Type: close to target
-Target Type: cell|coords|pin|sram
-Target: target_name 或 [x, y]
+Target Type: cell|coords|pin|sram|sram_group
+Target: target_name 或 [x, y] 或 space-separated block names (for sram_group)
 Element: instance_name1 instance_name2 ...
-Element Type: single|instancesgroup|module
-Area: 面積值（僅用於 instancesgroup/module）
+Element Type: instancesgroup|module
+Area: 面積值
 ```
 
-##### SRAM Target Type（新功能）
-當 `Target Type: sram` 時，工具會：
-1. 分析目標區塊的 pin box 位置
-2. 自動決定 pin 所在的邊（top/bottom/left/right）
-3. 在對應的邊放置 SRAM 群組，確保最短連接距離
-4. SRAM 群組的形狀會根據邊的長度和所需面積自動調整
+##### 支援的 Target Types
 
-範例：
-```
-Preplace Type: close to target
-Target Type: sram
-Target: u_cpu_core
-Element: sram_inst_0 sram_inst_1 sram_inst_2
-Element Type: instancesgroup
-Area: 50000.0
-```
+1. **cell**: 放置在指定元件（block/IO pad/MP sensor）附近
+   ```
+   Target Type: cell
+   Target: u_cpu_core
+   ```
+
+2. **coords**: 放置在指定座標附近
+   ```
+   Target Type: coords
+   Target: [1500.0, 1000.0]
+   ```
+
+3. **pin**: 放置在指定 pin 附近
+   ```
+   Target Type: pin
+   Target: u_block1/pin_name
+   ```
+
+4. **sram**: 智能 SRAM 放置（單一目標區塊）
+   - 自動分析目標區塊的 pin box 位置
+   - 決定最佳放置邊（top/bottom/left/right）
+   - 在對應邊創建 SRAM 群組
+   ```
+   Target Type: sram
+   Target: u_cpu_core
+   Element: sram_inst_0 sram_inst_1 sram_inst_2
+   Element Type: instancesgroup
+   Area: 50000.0
+   ```
+
+5. **sram_group**: 多區塊 SRAM 放置（新功能）
+   - 計算多個目標區塊的邊界框
+   - 在邊界框內尋找最大可用矩形區域
+   - 適合需要連接多個區塊的記憶體群組
+   ```
+   Target Type: sram_group
+   Target: u_block1 u_cpu_core u_dsp_block
+   Element: multi_sram_0 multi_sram_1 multi_sram_2
+   Element Type: instancesgroup
+   Area: 80000.0
+   ```
 
 #### Pipe 約束
 
@@ -182,53 +212,11 @@ placer = GridBasedPlacer(
 | `generate_tcl_script()` | 生成 Innovus TCL 腳本 |
 | `visualize_initial_design()` | 視覺化初始設計（步驟 1） |
 | `visualize_grid_state()` | 視覺化網格狀態（步驟 2） |
-| `determine_pin_edge()` | 判斷區塊的 pin box 位於哪一邊（新增） |
-| `allocate_sram_region()` | 根據 pin edge 分配 SRAM 區域（新增） |
+| `determine_pin_edge()` | 判斷區塊的 pin box 位於哪一邊 |
+| `allocate_sram_region()` | 根據 pin edge 分配 SRAM 區域 |
+| `find_max_rectangle_in_region()` | 在邊界框內尋找最大可用矩形（新增） |
 
 ### 資料結構
-
-#### Point
-```python
-@dataclass
-class Point:
-    x: float
-    y: float
-```
-
-#### Rectangle
-```python
-@dataclass
-class Rectangle:
-    llx: float  # 左下 x
-    lly: float  # 左下 y
-    urx: float  # 右上 x
-    ury: float  # 右上 y
-```
-
-#### Block
-```python
-@dataclass
-class Block:
-    name: str
-    boundary: Rectangle
-    pin_box: Optional[Rectangle] = None
-```
-
-#### Blockage
-```python
-@dataclass
-class Blockage:
-    name: str
-    boundary: Rectangle
-```
-
-#### IOPad
-```python
-@dataclass
-class IOPad:
-    name: str
-    boundary: Rectangle
-```
 
 #### Constraint
 ```python
@@ -236,9 +224,12 @@ class IOPad:
 class Constraint:
     type: str  # 'close_to_target' 或 'pipe'
     elements: List[str]
-    target_type: Optional[str] = None  # 'cell', 'coords', 'pin', 'sram'（新增 sram）
-    stages: Optional[List[List[str]]] = None  # 僅用於 pipe，每個 stage 是一個實例列表
-    # ... 其他屬性依約束類型而定
+    target_type: Optional[str] = None  # 'cell', 'coords', 'pin', 'sram', 'sram_group'
+    target_blocks: Optional[List[str]] = None  # 用於 sram_group，目標區塊列表
+    stages: Optional[List[List[str]]] = None  # 僅用於 pipe
+    element_type: str = 'instancesgroup'  # 'instancesgroup' 或 'module'（不再支援 'single'）
+    area: float = 20.0
+    # ... 其他視覺化相關屬性
 ```
 
 ## 🎨 視覺化功能
@@ -251,7 +242,6 @@ class Constraint:
 - 顯示原始設計佈局
 - 包含晶片邊界、核心區域、硬區塊、阻擋區域、I/O pads 和 MP sensors
 - 顯示設計統計資訊
-- 關閉視窗後繼續下一步
 
 #### Step 2: Grid State Map
 - 顯示網格地圖的初始狀態
@@ -259,69 +249,47 @@ class Constraint:
   - 淺綠色：可用空間 (FREE)
   - 淺紅色：被阻擋 (BLOCKED)
   - 淺黃色：保留區域 (RESERVED)
-- 顯示網格統計資訊
-- 關閉視窗後繼續下一步
 
 #### Step 3: Constraint Processing
 - 雙面板即時顯示：
   - **左側**：網格地圖即時更新
   - **右側**：放置結果視覺化
-- 處理每個約束時動態更新
-- 顯示當前處理的約束（黃色高亮標籤）
-- 使用不同顏色區分不同約束的放置結果
-- **Pipe Stage 群組**：使用紫色半透明矩形標示，虛線邊框
-- **SRAM 群組**：使用青色（cyan）半透明矩形標示，實線邊框（新增）
-
-### 視覺化特點
-
-- **優化的圖例位置**：圖例放置在圖形外部或底部，避免遮擋內容
-- **豐富的資訊顯示**：包含設計統計、網格使用率等資訊
-- **清晰的顏色方案**：使用直觀的顏色和透明度設定
-- **互動式更新**：可透過 `debug_plot_interval` 參數控制更新速度
-- **區分群組類型**：
-  - 一般群組：使用約束對應的顏色
-  - Pipe Stage 群組：紫色半透明，虛線邊框
-  - SRAM 群組：青色半透明，實線邊框
-
-## 🔍 網格狀態
-
-網格可能的狀態：
-
-| 狀態 | 值 | 說明 |
-|------|-----|------|
-| `GRID_FREE` | 0 | 可用於放置 |
-| `GRID_BLOCKED` | 1 | 被阻擋（硬區塊、blockage、核心區域外、已放置元件） |
-| `GRID_RESERVED` | 2 | 臨時保留（用於群組分配） |
+- 使用不同顏色區分不同類型的群組：
+  - **一般群組**：使用約束對應的顏色，半透明
+  - **Pipe Stage 群組**：紫色半透明矩形，虛線邊框
+  - **SRAM 群組**（單一區塊）：青色（cyan）半透明矩形，實線邊框
+  - **SRAM Multi-Block 群組**：洋紅色（magenta）半透明矩形，實線邊框
 
 ## 📤 輸出檔案
 
 ### 1. TCL 腳本 (dft_regs_pre_place.tcl)
 
-生成的 Innovus 命令：
+生成的 Innovus 命令（所有元件都作為群組放置）：
 
 ```tcl
 # Pre-placement TCL Script
 # Generated by Grid-Based Placer
 # Grid Size: 10.0 um
-# Blockages: 3
 
-# 群組定義（包含 close_to_target、pipe stage 和 SRAM 群組）
-deleteInstGroup GROUP_NAME
-createInstGroup GROUP_NAME -region llx lly urx ury
-addInstToInstGroup GROUP_NAME { inst1 inst2 ... }
+# 一般群組
+deleteInstGroup TVC_INST_GROUP_0
+createInstGroup TVC_INST_GROUP_0 -region llx lly urx ury
+addInstToInstGroup TVC_INST_GROUP_0 { inst1 inst2 ... }
 
 # Pipe Stage 群組
 deleteInstGroup TVC_PIPE_STAGE_0
 createInstGroup TVC_PIPE_STAGE_0 -region llx lly urx ury
 addInstToInstGroup TVC_PIPE_STAGE_0 { stage1_inst1 stage1_inst2 ... }
 
-# SRAM 群組（新增）
+# SRAM 群組（單一區塊目標）
 deleteInstGroup TVC_SRAM_GROUP_0
 createInstGroup TVC_SRAM_GROUP_0 -region llx lly urx ury
 addInstToInstGroup TVC_SRAM_GROUP_0 { sram_inst_0 sram_inst_1 ... }
 
-# 單一元件放置（僅來自 close_to_target 的 single 類型）
-placeInstance instance_name x y -softFixed
+# SRAM Multi-Block 群組（多區塊目標）
+deleteInstGroup TVC_SRAM_MULTI_GROUP_0
+createInstGroup TVC_SRAM_MULTI_GROUP_0 -region llx lly urx ury
+addInstToInstGroup TVC_SRAM_MULTI_GROUP_0 { multi_sram_0 multi_sram_1 ... }
 ```
 
 ### 2. 失敗列表 (failed_preplace.list)
@@ -329,7 +297,7 @@ placeInstance instance_name x y -softFixed
 記錄無法滿足的約束：
 
 ```
-Constraint C0 (element_name): Cannot find placement near target...
+Constraint C0 (elements: [...]): Cannot find placement near target...
 Constraint C1 for elements [...]: No free space found...
 ```
 
@@ -340,80 +308,30 @@ Constraint C1 for elements [...]: No free space found...
 用於 pipe 約束，尋找避開硬障礙物的最優路徑：
 
 1. 使用曼哈頓距離作為啟發函數
-2. **可以通過 `GRID_FREE` 和 `GRID_RESERVED` 網格**（允許穿過已放置的群組）
+2. 可以通過 `GRID_FREE` 和 `GRID_RESERVED` 網格（允許穿過已放置的群組）
 3. 只避開 `GRID_BLOCKED`（硬區塊、blockage、核心區域外）
 4. 返回最優路徑或 None（無解）
 
-### SRAM 放置策略（新增）
+### SRAM 放置策略
 
-對於 `Target Type: sram` 的特殊處理：
+#### 單一區塊目標（Target Type: sram）
 
-1. **Pin Edge 判定**：
-   - 計算 pin box 中心到區塊四邊的距離
-   - 選擇距離最近的邊作為 pin edge
+1. **Pin Edge 判定**：計算 pin box 到區塊四邊的距離，選擇最近的邊
+2. **區域計算**：根據 pin edge 決定 SRAM 群組的形狀和位置
+3. **自動優化**：確保最短連線長度，減少繞線複雜度
 
-2. **區域計算**：
-   - 根據 pin edge 決定 SRAM 群組的形狀
-   - 垂直邊（left/right）：高度等於區塊高度，寬度根據面積計算
-   - 水平邊（top/bottom）：寬度等於區塊寬度，高度根據面積計算
+#### 多區塊目標（Target Type: sram_group）
 
-3. **放置位置**：
-   - Left edge: SRAM 群組放置在區塊左側
-   - Right edge: SRAM 群組放置在區塊右側
-   - Top edge: SRAM 群組放置在區塊上方
-   - Bottom edge: SRAM 群組放置在區塊下方
-
-4. **優勢**：
-   - 自動優化連線長度
-   - 減少繞線複雜度
-   - 適應不同的區塊配置
+1. **邊界框計算**：計算所有目標區塊的邊界矩形
+2. **最大矩形搜尋**：在邊界框內使用直方圖演算法尋找最大可用矩形
+3. **位置優化**：選擇面積最大且最接近邊界框中心的矩形
+4. **彈性配置**：自動適應不同的區塊配置和可用空間
 
 ### Pipe Stage 放置策略
 
-對於 pipe 約束的特殊處理：
-
-1. **直接使用起終點位置**：
-   - 從已放置的 start/end 元件獲取確切位置
-   - 直接轉換為網格座標，不搜尋替代點
-
-2. **路徑規劃**：
-   - 使用 A* 找出從起點到終點的路徑
-   - 路徑可以穿過 `GRID_RESERVED` 區域（已放置的群組）
-
-3. **Stage 分配**：
-   - 將路徑等分為 n+1 段（n 個 stage）
-   - 每個分段點作為對應 stage 的目標位置
-
-4. **放置驗證**：
-   - 檢查每個分段點是否為 `GRID_FREE`
-   - 如果不是，使用 BFS 搜尋最近的可用網格
-   - 每個 stage 群組使用單一網格單元
-
-### 設計理念
-
-這種改進的方法更符合實際 IC 設計需求：
-
-1. **保持連接完整性**：DFT scan chain 必須連接已經確定位置的元件（如 I/O pads、功能模塊），不應改變這些元件的位置
-2. **現實的繞線模型**：實際佈線可以穿過放置群組的上方（不同金屬層），因此路徑規劃允許穿過 RESERVED 區域
-3. **分離關注點**：路徑規劃（routing）與元件放置（placement）是兩個不同的步驟，不應混淆
-4. **智能 SRAM 配置**：SRAM 記憶體通常需要緊密連接到處理器核心，自動 pin edge 偵測確保最優放置
-
-### 最近可用網格搜尋
-
-使用 BFS 從目標點向外搜尋最近的可用網格：
-
-1. 從目標網格開始
-2. 探索四個方向
-3. 返回第一個找到的 `GRID_FREE` 網格
-
-### 區域分配演算法
-
-為 instancesgroup 分配矩形區域：
-
-1. 計算所需網格數量
-2. 從目標點螺旋向外搜尋
-3. 尋找滿足面積要求的矩形區域
-4. 標記為 `GRID_RESERVED`
+1. **路徑規劃**：使用 A* 找出從起點到終點的路徑
+2. **Stage 分配**：將路徑等分，每個分段點作為 stage 群組位置
+3. **放置驗證**：檢查並調整到最近的可用網格
 
 ## ⚙️ 進階設定
 
@@ -432,128 +350,63 @@ placer = GridBasedPlacer(
 )
 ```
 
-### 調整視覺化速度
-
-```python
-placer.run(
-    tvc_json='design.json',
-    constraints='constraints.phy',
-    debug_plot_interval=1.0  # 每個約束處理後暫停 1 秒
-)
-```
-
-### 自訂輸出檔名
-
-```python
-placer.run(
-    tvc_json='input.json',
-    constraints='constraints.phy',
-    output_tcl='custom_placement.tcl',
-    failed_list='custom_failed.list'
-)
-```
-
 ## 📊 效能考量
 
 - **網格大小**：較小的網格提供更精確的放置，但增加計算時間
 - **約束數量**：大量約束可能導致處理時間增長
-- **Pipe Stage 數量**：更多的 stage 需要更長的路徑和更多的網格
-- **SRAM 群組**：Pin edge 判定為 O(1) 操作，不影響整體效能
-- **路徑規劃效能**：改進的 A* 演算法允許穿過 RESERVED 區域，通常能找到更短的路徑，提高效率
-- **視覺化**：可以調整 `debug_plot_interval` 或關閉視覺化以提高處理速度
+- **SRAM 群組**：
+  - 單一區塊：Pin edge 判定為 O(1) 操作
+  - 多區塊：最大矩形搜尋複雜度較高，但通常仍很快速
+- **路徑規劃**：改進的 A* 演算法允許穿過 RESERVED 區域，提高效率
 
 ## 🐛 除錯建議
 
 1. **檢查根模組名稱**：確保程式中的 `root_module_name` 與 TVC JSON 檔案中的鍵名完全匹配
 2. **檢查輸入檔案格式**：確保 JSON 格式正確，座標合理
-3. **確認 IP 尺寸定義**：確保所有 I/O pads 和 MP sensors 的 CellName 在 IPS 區塊中有對應的尺寸定義
+3. **確認 Element Type**：只使用 `instancesgroup` 或 `module`，不再支援 `single`
 4. **觀察三步驟視覺化**：
-   - Step 1: 確認設計載入正確，包括 I/O pads 和 MP sensors
+   - Step 1: 確認設計載入正確
    - Step 2: 確認網格地圖正確標記障礙物
-   - Step 3: 即時觀察約束處理過程，注意：
-     - Pipe 路徑（虛線）可能穿過群組區域（RESERVED）
-     - Stage 實際放置位置可能偏離路徑（尋找最近 FREE 網格）
-     - SRAM 群組（青色）的放置位置是否符合 pin edge
-5. **檢視失敗列表**：了解哪些約束無法滿足及原因
-6. **調整網格大小**：如果放置失敗過多，嘗試減小網格大小
-7. **檢查 Pipe 約束**：
-   - 確認起點和終點元件已經被放置或存在於設計中
-   - 觀察路徑是否被硬區塊完全阻斷
-   - 檢查 stage 放置點附近是否有足夠的 FREE 網格
-8. **檢查 SRAM 約束**：
-   - 確認目標區塊存在且有定義 pin box
-   - 檢查 SRAM 放置區域是否與其他元件衝突
-   - 觀察 pin edge 判定是否正確
-9. **使用測試模式**：先用內建測試案例驗證工具功能
+   - Step 3: 觀察約束處理過程，注意不同顏色的群組類型
+5. **檢查 SRAM 約束**：
+   - 單一區塊：確認目標區塊存在且有 pin box
+   - 多區塊：確認所有目標區塊都存在
+6. **使用測試模式**：先用內建測試案例驗證工具功能
 
 ## 📝 注意事項
 
 1. **根模組名稱**：預設為 `"SoIC_A16_eTV5_root"`，必須與 TVC JSON 中的鍵名匹配
 2. **座標系統**：所有座標單位為微米（μm）
 3. **約束順序**：先處理所有 close_to_target，再處理 pipe 約束
-4. **SRAM 放置**：
-   - 需要目標區塊有明確的 pin box 定義
-   - 自動決定最佳放置邊，不需手動指定
-   - 生成的群組名稱為 `TVC_SRAM_GROUP_x`
-5. **Pipe 路徑規劃**：
-   - 起終點使用實際放置位置，不會偏移
-   - 路徑可以穿過已放置的群組（RESERVED 區域）
-   - 每個 stage 放置時才檢查是否有可用網格
-6. **Pipe Stage 群組**：每個 stage 使用單一網格單元，適合小型群組
-7. **Core Area**：只能在核心區域內放置元件
-8. **Blockages**：會被標記為 GRID_BLOCKED，無法放置元件和路徑通過
-9. **I/O Pads 和 MP Sensors**：從 TVC JSON 自動載入，作為可參考的目標但不可覆蓋
-10. **視覺化視窗**：每個步驟結束後需手動關閉視窗才能繼續
+4. **Element Type**：
+   - **不再支援 `single` 類型**
+   - 所有元件都作為群組（`instancesgroup` 或 `module`）放置
+   - Pipe 約束自動使用 `instancesgroup`
+5. **SRAM 放置**：
+   - 單一區塊：生成 `TVC_SRAM_GROUP_x` 群組
+   - 多區塊：生成 `TVC_SRAM_MULTI_GROUP_x` 群組
+6. **群組命名**：
+   - 一般群組：`TVC_INST_GROUP_x`
+   - Pipe Stage：`TVC_PIPE_STAGE_x`
+   - SRAM（單一）：`TVC_SRAM_GROUP_x`
+   - SRAM（多區塊）：`TVC_SRAM_MULTI_GROUP_x`
 
 ## 🔄 更新歷史
 
-### 最新更新 (SRAM Placement Support)
-- **新增 SRAM target type**：支援 `Target Type: sram` 約束類型
-- **智能 Pin Edge 偵測**：自動判斷區塊的 pin box 位於哪一邊
-- **自適應 SRAM 放置**：根據 pin edge 自動決定 SRAM 群組的最佳位置和形狀
-- **視覺化增強**：SRAM 群組使用青色（cyan）標示，實線邊框
-- **TCL 輸出優化**：生成 `TVC_SRAM_GROUP_x` 群組命令
-- **新增方法**：`determine_pin_edge()` 和 `allocate_sram_region()`
-
-### 先前更新 (Improved Pipe Path Finding)
-- **改進路徑規劃**：A* 演算法現可通過 RESERVED 區域，只避開 BLOCKED
-- **保持起終點精確性**：直接使用 start/end 的實際位置，不再搜尋替代點
-- **智能 Stage 放置**：先規劃完整路徑，再為每個 stage 尋找可用位置
-- **更真實的路徑**：pipe 路徑可穿過已放置的群組，更符合實際 DFT 設計需求
-
-### 先前更新 (Pipe Stage Groups)
-- **Pipe 約束改進**：移除 `Element Type: single`，預設為 `instancesgroup`
-- **Stage 群組化**：每個 pipe stage 現在作為獨立群組處理
-- **簡化語法**：pipe 約束不再需要指定 Element Type 或 Area
-- **視覺化增強**：Pipe Stage 群組使用紫色和虛線邊框區分
-- **TCL 輸出優化**：所有群組（包括 pipe stages）都生成 group 命令
+### 最新更新 (Remove Single Element Type & Add SRAM_GROUP)
+- **移除 single element type**：所有元件現在都作為群組放置
+- **新增 sram_group target type**：支援多區塊邊界框內的 SRAM 放置
+- **新增最大矩形搜尋演算法**：`find_max_rectangle_in_region()` 方法
+- **視覺化增強**：新增洋紅色（magenta）標示多區塊 SRAM 群組
+- **簡化約束語法**：移除不必要的 element type 選項
+- **TCL 輸出優化**：所有輸出都是群組命令，沒有個別實例放置
 
 ### 先前更新
-- **簡化輸入檔案**：移除獨立的 I/O 位置檔案，整合到 TVC JSON
-- **新增 MP_SENSOR 支援**：自動從 Solution_MP_SENSOR 載入並處理
-- **改進 I/O pads 處理**：從 Solution_GPIO 自動載入
-- **更新預設根模組名稱**：改為 `SoIC_A16_eTV5_root`
-- 改進三步驟視覺化流程，提供更清晰的除錯體驗
-- 優化圖例位置和資訊顯示
+- 新增 SRAM target type（單一區塊）
+- 改進 Pipe 路徑尋找演算法
+- 新增 MP_SENSOR 支援
 - 支援 blockages 處理
-- 新增 pipe 約束類型
-- 改進視覺化系統
-- 優化 A* 演算法效能
-- 支援 instancesgroup 類型
-
-## 📧 技術支援
-
-如遇到問題，請檢查：
-
-1. Python 版本 >= 3.8
-2. 必要套件：numpy, matplotlib
-3. 輸入檔案格式是否正確
-4. 根模組名稱是否匹配（預設：`SoIC_A16_eTV5_root`）
-5. IPS 區塊中是否包含所有必要的尺寸定義
-6. Solution_GPIO 和 Solution_MP_SENSOR 區塊是否存在且格式正確
-7. Pipe 約束的起點和終點是否有效
-8. SRAM 約束的目標區塊是否有 pin box 定義
-9. 視覺化視窗是否正確關閉以繼續流程
+- 三步驟視覺化流程
 
 ---
 
