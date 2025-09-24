@@ -3,7 +3,29 @@ def create_test_files_with_blockages():
     """建立包含 blockages 的測試檔案 - Updated to remove 'single' element type"""
     import json
 
-    # TVC JSON with blockages
+    # ============================================================================
+    # SubBlockShapes Specification (Based on our discussion):
+    # ============================================================================
+    # 1. LOCATION: SubBlockShapes is placed at the same level as BlockName, Coords
+    #    inside each BlockShape dictionary
+    #
+    # 2. COORDINATE SYSTEM: All Coords and PinCoords in SubBlockShapes are
+    #    RELATIVE to their parent block, not global coordinates
+    #    Example: If u_block1 is at global [500,500] to [1000,1000],
+    #             and u_sub1 has relative coords [50,50] to [200,150],
+    #             then u_sub1's global position is [550,550] to [700,650]
+    #
+    # 3. MULTI-LEVEL NESTING: SubBlockShapes can contain their own SubBlockShapes,
+    #    supporting unlimited nesting levels. Each level's coordinates are relative
+    #    to its immediate parent.
+    #
+    # 4. FORMAT: Same as BlockShapes - must have BlockName, DesignName, Coords, PinCoords
+    #    Optional: SubBlockShapes (only include if there are sub-blocks)
+    #
+    # 5. EMPTY CASE: If no sub-blocks exist, do NOT include the SubBlockShapes key
+    # ============================================================================
+
+    # TVC JSON with blockages and SubBlockShapes
     tvc_data = {
         "S1_output": {
             "SoIC_A16_eTV5_root": { # 修改為新的根模組名稱
@@ -15,9 +37,87 @@ def create_test_files_with_blockages():
                 "BlockShapes": [{
                     "BlockName": "u_block1",
                     "DesignName": "BLOCK1",
-                    "Coords": [[500, 500], [1000, 500], [1000, 1000], [500, 1000]],
-                    "PinCoords": [[[600, 600], [650, 650]], [[700,700],[750,750]]], # 測試 pin box 列表
-                    "Attribute": "Module"
+                    "Coords": [[500, 500], [1000, 500], [1000, 1000], [500, 1000]],  # Global coords: 500x500 block
+                    "PinCoords": [[[600, 600], [650, 650]], [[700,700],[750,750]]], # Global pin coords
+                    "Attribute": "Module",
+                    # SubBlockShapes: First level of hierarchy
+                    "SubBlockShapes": [{
+                        "BlockName": "u_sub1",
+                        "DesignName": "SUB_MODULE_A",
+                        # Relative to u_block1: actual global position would be [550,550] to [700,650]
+                        "Coords": [[50, 50], [200, 50], [200, 150], [50, 150]],
+                        "PinCoords": [[[0, 25], [0, 50]], [[150, 75], [150, 100]]],  # Relative pin coords
+                        # SubBlockShapes: Second level of hierarchy
+                        "SubBlockShapes": [{
+                            "BlockName": "u_sub1_1",
+                            "DesignName": "TINY_MODULE",
+                            # Relative to u_sub1: in u_sub1's coord system [10,10] to [60,40]
+                            # Global would be approximately [560,560] to [610,590]
+                            "Coords": [[10, 10], [60, 10], [60, 40], [10, 40]],
+                            "PinCoords": [[[0, 15], [0, 25]]],
+                            # SubBlockShapes: Third level of hierarchy (demonstrating deep nesting)
+                            "SubBlockShapes": [{
+                                "BlockName": "u_sub1_1_1",
+                                "DesignName": "NANO_MODULE",
+                                # Relative to u_sub1_1: [5,5] to [25,15] in u_sub1_1's coord system
+                                "Coords": [[5, 5], [25, 5], [25, 15], [5, 15]],
+                                "PinCoords": [[[10, 0], [10, 5]]]
+                            }, {
+                                "BlockName": "u_sub1_1_2",
+                                "DesignName": "NANO_MODULE",
+                                # Another block at the same level as u_sub1_1_1
+                                "Coords": [[30, 5], [45, 5], [45, 15], [30, 15]],
+                                "PinCoords": [[[7, 0], [7, 5]]]
+                            }]
+                        }, {
+                            # Second sub-block at the same level as u_sub1_1
+                            "BlockName": "u_sub1_2",
+                            "DesignName": "TINY_MODULE_B",
+                            "Coords": [[80, 10], [130, 10], [130, 40], [80, 40]],
+                            "PinCoords": [[[25, 0], [25, 10]]]
+                        }]
+                    }, {
+                        "BlockName": "u_sub2",
+                        "DesignName": "SUB_MODULE_B",
+                        # Another first-level sub-block, relative to u_block1
+                        "Coords": [[250, 100], [450, 100], [450, 300], [250, 300]],
+                        "PinCoords": [[[0, 50], [0, 100]], [[200, 100], [200, 150]]],
+                        # SubBlockShapes: Second level under u_sub2
+                        "SubBlockShapes": [{
+                            "BlockName": "u_sub2_1",
+                            "DesignName": "CORE_MODULE",
+                            "Coords": [[20, 20], [180, 20], [180, 80], [20, 80]],
+                            "PinCoords": [[[80, 0], [100, 0]], [[80, 60], [100, 60]]],
+                            # SubBlockShapes: Third level under u_sub2_1
+                            "SubBlockShapes": [{
+                                "BlockName": "u_sub2_1_1",
+                                "DesignName": "MICRO_CORE",
+                                "Coords": [[40, 20], [80, 20], [80, 40], [40, 40]],
+                                "PinCoords": [[[20, 0], [20, 10]]],
+                                # SubBlockShapes: Fourth level (demonstrating 4-level deep nesting)
+                                "SubBlockShapes": [{
+                                    "BlockName": "u_sub2_1_1_1",
+                                    "DesignName": "PICO_CORE",
+                                    "Coords": [[10, 5], [30, 5], [30, 15], [10, 15]],
+                                    "PinCoords": [[[10, 0], [10, 5]]]
+                                }]
+                            }]
+                        }, {
+                            # Another second-level block under u_sub2
+                            "BlockName": "u_sub2_2",
+                            "DesignName": "MEMORY_MODULE",
+                            "Coords": [[20, 100], [180, 100], [180, 180], [20, 180]],
+                            "PinCoords": [[[0, 40], [10, 40]], [[170, 40], [180, 40]]]
+                            # No SubBlockShapes key here - demonstrating the empty case
+                        }]
+                    }, {
+                        # Third first-level sub-block under u_block1
+                        "BlockName": "u_sub3",
+                        "DesignName": "SUB_MODULE_C",
+                        "Coords": [[100, 350], [250, 350], [250, 450], [100, 450]],
+                        "PinCoords": [[[75, 0], [75, 20]], [[75, 100], [75, 120]]]
+                        # No SubBlockShapes - this sub-block has no children
+                    }]
                 }, {
                     "BlockName": "u_block2",
                     "DesignName": "BLOCK2",
@@ -233,5 +333,99 @@ def create_test_files_with_blockages():
     print("  - Removed all 'single' element type (now use 'instancesgroup')")
     print("  - Added SRAM target type test (single block)")
     print("  - Added SRAM_GROUP target type test (multiple blocks)")
+    print("  - Added SubBlockShapes to u_block1 with multi-level nesting (up to 4 levels deep)")
     print("  - Pipe constraints create stage groups")
     print("  - All placements now create groups, no individual instance placement")
+
+    print("\n" + "="*70)
+    print("SubBlockShapes Hierarchy Visualization for u_block1:")
+    print("="*70)
+
+def convert_relative_to_global_coords(parent_coords, relative_coords):
+    """
+    Convert relative coordinates to global coordinates.
+
+    Args:
+        parent_coords: Parent block's global coords [[llx,lly], ...]
+        relative_coords: Sub-block's relative coords [[rx,ry], ...]
+
+    Returns:
+        Global coordinates for the sub-block
+    """
+    parent_llx = min(c[0] for c in parent_coords)
+    parent_lly = min(c[1] for c in parent_coords)
+
+    global_coords = []
+    for rx, ry in relative_coords:
+        global_coords.append([parent_llx + rx, parent_lly + ry])
+
+    return global_coords
+
+def print_subblock_hierarchy(block_data, indent=0, parent_global_llx=None, parent_global_lly=None):
+    """
+    Recursively print SubBlockShapes hierarchy with coordinate conversion.
+
+    Args:
+        block_data: Block dictionary with potential SubBlockShapes
+        indent: Current indentation level
+        parent_global_llx: Parent's global lower-left X coordinate
+        parent_global_lly: Parent's global lower-left Y coordinate
+    """
+    if 'SubBlockShapes' not in block_data:
+        return
+
+    for sub_block in block_data['SubBlockShapes']:
+        # Calculate global position of this sub-block
+        if parent_global_llx is not None and parent_global_lly is not None:
+            sub_relative_coords = sub_block['Coords']
+            sub_llx = min(c[0] for c in sub_relative_coords) + parent_global_llx
+            sub_lly = min(c[1] for c in sub_relative_coords) + parent_global_lly
+            sub_urx = max(c[0] for c in sub_relative_coords) + parent_global_llx
+            sub_ury = max(c[1] for c in sub_relative_coords) + parent_global_lly
+
+            print(" " * indent + f"└── {sub_block['BlockName']}: "
+                  f"Relative [{min(c[0] for c in sub_relative_coords)},{min(c[1] for c in sub_relative_coords)}] to "
+                  f"[{max(c[0] for c in sub_relative_coords)},{max(c[1] for c in sub_relative_coords)}], "
+                  f"Global [{sub_llx},{sub_lly}] to [{sub_urx},{sub_ury}]")
+
+            # Recursive call for deeper levels
+            print_subblock_hierarchy(sub_block, indent + 4, sub_llx, sub_lly)
+        else:
+            print(" " * indent + f"└── {sub_block['BlockName']}")
+            print_subblock_hierarchy(sub_block, indent + 4)
+
+# Example usage (can be uncommented for testing):
+# if __name__ == "__main__":
+#     create_test_files_with_blockages()
+#
+#     # Test coordinate conversion
+#     import json
+#     with open('test_tvc_blockage.json', 'r') as f:
+#         data = json.load(f)
+#
+#     u_block1 = data["S1_output"]["SoIC_A16_eTV5_root"]["BlockShapes"][0]
+#     print("\nCoordinate Conversion Example for u_block1:")
+#     print("="*70)
+#     print(f"u_block1 Global: {u_block1['Coords']}")
+#     print_subblock_hierarchy(u_block1, 0, 500, 500)  # 500,500 is u_block1's llx,lly
+    print("""
+    u_block1 (Global: [500,500] to [1000,1000])
+    │
+    ├── u_sub1 (Relative: [50,50] to [200,150], Global: ~[550,550] to [700,650])
+    │   ├── u_sub1_1 (Relative to u_sub1: [10,10] to [60,40])
+    │   │   ├── u_sub1_1_1 (Relative to u_sub1_1: [5,5] to [25,15]) - Level 3
+    │   │   └── u_sub1_1_2 (Relative to u_sub1_1: [30,5] to [45,15]) - Level 3
+    │   └── u_sub1_2 (Relative to u_sub1: [80,10] to [130,40])
+    │
+    ├── u_sub2 (Relative: [250,100] to [450,300], Global: ~[750,600] to [950,800])
+    │   ├── u_sub2_1 (Relative to u_sub2: [20,20] to [180,80])
+    │   │   └── u_sub2_1_1 (Relative to u_sub2_1: [40,20] to [80,40])
+    │   │       └── u_sub2_1_1_1 (Relative to u_sub2_1_1: [10,5] to [30,15]) - Level 4!
+    │   └── u_sub2_2 (Relative to u_sub2: [20,100] to [180,180])
+    │
+    └── u_sub3 (Relative: [100,350] to [250,450], Global: ~[600,850] to [750,950])
+
+    Note: All coordinates in SubBlockShapes are RELATIVE to their immediate parent block.
+    """)
+    print("="*70)
+
