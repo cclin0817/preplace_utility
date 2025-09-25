@@ -254,6 +254,7 @@ def create_test_files_with_blockages():
         f.write("Element Type: instancesgroup\n")
         f.write("Area: 100.0\n\n")
 
+        f.write("Preplace Type: close to target\n")
         f.write("Target Type: coords\n")
         f.write("Target: [1500.0, 1000.0]\n")
         f.write("Element: u_test/reg_0 u_test/reg_1 u_test/reg_2 u_test/reg_3\n")

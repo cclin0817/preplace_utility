@@ -166,7 +166,7 @@ class GridOperations:
     def find_max_rectangle_in_region(self, bounding_rect: Rectangle) -> Optional[Rectangle]:
         """
         Find the largest rectangle of FREE grids within the given bounding rectangle.
-        Uses an approximate algorithm for efficiency.
+        Uses a corrected histogram-based algorithm.
         """
         # Convert bounding rectangle to grid coordinates
         grid_llx, grid_lly, grid_urx, grid_ury = bounding_rect.to_grid_region(self.grid_size)
@@ -187,7 +187,7 @@ class GridOperations:
         if rows == 0 or cols == 0:
             return None
 
-        # Use a simplified maximal rectangle algorithm
+        # Use histogram-based maximal rectangle algorithm
         # For each row, calculate the height of consecutive FREE cells above
         heights = np.zeros((rows, cols), dtype=int)
 
@@ -206,57 +206,65 @@ class GridOperations:
         best_distance = float('inf')
         bounding_center = bounding_rect.center()
 
-        # For each row, find the maximum rectangle using histogram approach
+        # For each row, find the maximum rectangle using corrected histogram approach
         for i in range(rows):
-            # Find maximum rectangle in histogram heights[i]
-            for j in range(cols):
-                if heights[i, j] == 0:
+            # For each column as a potential starting point
+            for start_col in range(cols):
+                if heights[i, start_col] == 0:
                     continue
 
-                # Expand left and right to find width
-                width = 1
-                min_height = heights[i, j]
+                # Try different heights starting from this column
+                min_height = heights[i, start_col]
 
-                # Expand left
-                left = j
-                while left > 0 and heights[i, left-1] > 0:
-                    left -= 1
-                    min_height = min(min_height, heights[i, left])
+                # Extend to the right and track minimum height
+                for end_col in range(start_col, cols):
+                    if heights[i, end_col] == 0:
+                        break
 
-                # Expand right
-                right = j
-                while right < cols - 1 and heights[i, right+1] > 0:
-                    right += 1
-                    min_height = min(min_height, heights[i, right])
+                    # Update minimum height for this range
+                    min_height = min(min_height, heights[i, end_col])
 
-                # Calculate area
-                width = right - left + 1
-                area = width * min_height
+                    # Calculate area for this rectangle
+                    width = end_col - start_col + 1
+                    area = width * min_height
 
-                # Calculate the actual rectangle coordinates
-                rect_grid_llx = grid_llx + left
-                rect_grid_lly = grid_lly + i - min_height + 1
-                rect_grid_urx = grid_llx + right + 1
-                rect_grid_ury = grid_lly + i + 1
+                    # Calculate the actual rectangle coordinates
+                    rect_grid_llx = grid_llx + start_col
+                    rect_grid_lly = grid_lly + i - min_height + 1
+                    rect_grid_urx = grid_llx + end_col + 1
+                    rect_grid_ury = grid_lly + i + 1
 
-                # Convert back to real coordinates
-                rect = Rectangle(
-                    rect_grid_llx * self.grid_size,
-                    rect_grid_lly * self.grid_size,
-                    rect_grid_urx * self.grid_size,
-                    rect_grid_ury * self.grid_size
-                )
+                    # Verify that all cells in this rectangle are FREE
+                    # (This is a safety check - should be guaranteed by the algorithm)
+                    all_free = True
+                    for check_y in range(rect_grid_lly - grid_llx, rect_grid_ury - grid_llx):
+                        for check_x in range(start_col, end_col + 1):
+                            if check_y < 0 or check_y >= rows or sub_grid[check_y, check_x] != self.GRID_FREE:
+                                all_free = False
+                                break
+                        if not all_free:
+                            break
 
-                # Calculate distance to bounding center
-                rect_center = rect.center()
-                distance = ((rect_center.x - bounding_center.x)**2 +
-                           (rect_center.y - bounding_center.y)**2)**0.5
+                    if not all_free:
+                        continue
 
-                # Choose the rectangle with largest area, or closest to center if tied
-                if area > max_area or (area == max_area and distance < best_distance):
-                    max_area = area
-                    best_rect = rect
-                    best_distance = distance
+                    # Convert back to real coordinates
+                    rect = Rectangle(
+                        rect_grid_llx * self.grid_size,
+                        rect_grid_lly * self.grid_size,
+                        rect_grid_urx * self.grid_size,
+                        rect_grid_ury * self.grid_size
+                    )
+
+                    # Calculate distance to bounding center
+                    rect_center = rect.center()
+                    distance = ((rect_center.x - bounding_center.x)**2 +
+                               (rect_center.y - bounding_center.y)**2)**0.5
+
+                    # Choose the rectangle with largest area, or closest to center if tied
+                    if area > max_area or (area == max_area and distance < best_distance):
+                        max_area = area
+                        best_rect = rect
+                        best_distance = distance
 
         return best_rect
-
